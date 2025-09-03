@@ -1,3 +1,4 @@
+from sqlite3 import Date
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from datetime import datetime, timedelta
@@ -18,30 +19,14 @@ leaguesPath = {
     'Germany' : '/D1',   # Bundesliga
 }
 
-# Temporadas (22/23, 23/24, 24/25)
-SEASONS = ['2223', '2324', '2425']
+# Cantidad de temporadas a cubrir
+AMOUNT_OF_SEASONS = 3
 
 # Dónde guardar
 DEFAULT_OUTPUT_DIR = "/tmp/football_data"
 
 
 # ---------- Utilidades ----------
-def _safe_read_csv(content_bytes):
-    """
-    Lee CSV en pandas desde bytes probando encodings y separadores típicos.
-    """
-    for enc in ("latin1", "utf-8", "cp1252"):
-        try:
-            # football-data suele usar coma como separador
-            df = pd.read_csv(io.BytesIO(content_bytes), encoding=enc)
-            return df
-        except Exception:
-            continue
-    # último intento: especificar sep="," explícito
-    df = pd.read_csv(io.BytesIO(content_bytes), encoding="latin1", sep=",", engine="python")
-    return df
-
-
 def _clean_and_sort(df: pd.DataFrame) -> pd.DataFrame:
     """
     - Normaliza columnas (strip)
@@ -71,8 +56,7 @@ def _clean_and_sort(df: pd.DataFrame) -> pd.DataFrame:
     df = df.drop(columns=["__dt"], errors="ignore")
     return df
 
-
-def _download_with_retries(url: str, retries: int = 3, delay: float = 1.5) -> bytes:
+def DownloadWithRetries(url: str, retries: int = 3, delay: float = 1.5) -> bytes:
     """
     Descarga con pequeños reintentos.
     """
@@ -87,11 +71,21 @@ def _download_with_retries(url: str, retries: int = 3, delay: float = 1.5) -> by
             time.sleep(delay)
     raise last_exc
 
+def ReturnSeasons(date_str: str, cantidadTemporadas: int):
+    date = datetime.strptime(date_str, "%d/%m/%Y")
+    year = date.year % 100  # últimos dos dígitos
+
+    if(date >= datetime(date.year, 8, 15)):
+      year = year +1
+    
+    temporadas = [f"{(year - i -1 ):02d}{(year - i):02d}" for i in range(cantidadTemporadas)]
+    return temporadas
+    
 
 # ---------- Tarea principal ----------
-def fetch_eu_top5_last3_seasons(output_dir: str = DEFAULT_OUTPUT_DIR, **kwargs):
+def GetEuropeFootballStats(output_dir: str = DEFAULT_OUTPUT_DIR, **kwargs):
     """
-    Descarga CSVs de 5 grandes ligas (E0, F1, SP1, I1, D1) para temporadas 2223, 2324, 2425.
+    Descarga CSVs de 5 grandes ligas (E0, F1, SP1, I1, D1) para temporadas x temporadas hacia atras.
     Guarda:
       - raw: output_dir/<Liga>/<Temporada>/<code>.csv
       - clean: output_dir/<Liga>/<Temporada>/<code>_sorted.csv
@@ -105,9 +99,12 @@ def fetch_eu_top5_last3_seasons(output_dir: str = DEFAULT_OUTPUT_DIR, **kwargs):
     per_league_frames = {lg: [] for lg in leaguesPath.keys()}
     all_frames = []
 
+    # Calculamos la cantidad de temporadas a descargar
+    seasons = ReturnSeasons(datetime.today().strftime("%d/%m/%Y"), AMOUNT_OF_SEASONS)
+
     for league_name, league_code in leaguesPath.items():
-        for season in SEASONS:
-            code = league_code.strip("/").upper()  # E0, F1, SP1, I1, D1
+        for season in seasons:
+            code = league_code.strip("/").upper()
             url = f"{SOURCE_PATH}/{season}/{code}.csv"
             league_dir = os.path.join(output_dir, league_name, season)
             os.makedirs(league_dir, exist_ok=True)
@@ -116,13 +113,13 @@ def fetch_eu_top5_last3_seasons(output_dir: str = DEFAULT_OUTPUT_DIR, **kwargs):
             sorted_path = os.path.join(league_dir, f"{code}_sorted.csv")
 
             try:
-                content = _download_with_retries(url)
+                content = DownloadWithRetries(url)
                 # Guardar raw
                 with open(raw_path, "wb") as f:
                     f.write(content)
 
                 # Leer y ordenar
-                df = _safe_read_csv(content)
+                df = df = pd.read_csv(io.BytesIO(content), encoding="utf-8", sep=",", engine="python")
                 df = _clean_and_sort(df)
 
                 # Guardar ordenado
@@ -206,8 +203,8 @@ with DAG(
 ) as dag:
 
     fetch_top5_data = PythonOperator(
-        task_id="fetch_eu_top5_last3_seasons",
-        python_callable=fetch_eu_top5_last3_seasons,
+        task_id="GetEuropeFootballStats",
+        python_callable=GetEuropeFootballStats,
         op_kwargs={
             "output_dir": "/tmp/football_data",   # podés templatar si querés
         },
