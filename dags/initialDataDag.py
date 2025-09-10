@@ -20,7 +20,7 @@ leaguesPath = {
 }
 
 # Cantidad de temporadas a cubrir
-AMOUNT_OF_SEASONS = 3
+AMOUNT_OF_SEASONS = 20
 
 # Dónde guardar
 DEFAULT_OUTPUT_DIR = "/tmp/football_data"
@@ -119,7 +119,7 @@ def GetEuropeFootballStats(output_dir: str = DEFAULT_OUTPUT_DIR, **kwargs):
                     f.write(content)
 
                 # Leer y ordenar
-                df = df = pd.read_csv(io.BytesIO(content), encoding="utf-8", sep=",", engine="python")
+                df = pd.read_csv(io.BytesIO(content), encoding="utf-8", sep=",", engine="python")
                 df = _clean_and_sort(df)
 
                 # Guardar ordenado
