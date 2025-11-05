@@ -177,7 +177,7 @@ def main():
     st.markdown("---")
     st.header("📌 ¡Predecí tu partido ahora mismo!")
 
-    pipeline = joblib.load("dev\pipeline_logreg_pca_09.joblib")
+    pipeline = joblib.load("dev/pipeline_logreg_pca_09.joblib")
 
     render_manual_form(pipeline)
     
