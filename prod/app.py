@@ -13,6 +13,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.append(str(ROOT_DIR))
 
 from dev.utils import LegacySelectPreprocessPCA
+from dev.preprocess import preprocessCSV
 
 # -------------------------------------------------------
 # Config
@@ -22,10 +23,6 @@ st.set_page_config(page_title="Soccer Predictor", layout="wide")
 # -------------------------------------------------------
 # Utils
 # -------------------------------------------------------
-@st.cache_resource(show_spinner=False)
-def load_pipeline(path: str):
-    """Carga y cachea el pipeline entrenado (joblib)."""
-    return joblib.load(path)
 
 def build_prob_table(probas: np.ndarray, classes: np.ndarray) -> pd.DataFrame:
     """
@@ -133,14 +130,12 @@ def render_manual_form(pipeline):
             if col not in df_probs.columns:
                 df_probs[col] = np.nan
 
-        df_probs["P_H_or_D"] = df_probs.get("H", 0) + df_probs.get("D", 0)
-
         st.success("✅ Predicción realizada para el partido ingresado.")
         st.write("**Probabilidades** (una sola fila):")
-        st.dataframe(df_probs[["H","D","A","P_H_or_D"]].style.format("{:.2%}"))
+        st.dataframe(df_probs[["H","D","A"]].style.format("{:.2%}"))
 
         # Gráfico
-        st.bar_chart(df_probs[["H","D","A","P_H_or_D"]].iloc[0])
+        st.bar_chart(df_probs[["H","D","A"]].iloc[0])
 
     except Exception as e:
         st.error(f"Ocurrió un error en la predicción: {e}")
@@ -182,7 +177,7 @@ def main():
     st.markdown("---")
     st.header("📌 ¡Predecí tu partido ahora mismo!")
 
-    pipeline = load_pipeline("..\dev\pipeline_logreg_pca_09.joblib")
+    pipeline = joblib.load("dev\pipeline_logreg_pca_09.joblib")
 
     render_manual_form(pipeline)
     
@@ -194,9 +189,9 @@ def main():
     df_pred: Optional[pd.DataFrame] = None
     if data_file is not None:
         try:
-            df_pred = pd.read_csv(data_file)
+            df_pred = preprocessCSV(pd.read_csv(data_file))
             st.write("Vista previa de los datos cargados:")
-            st.dataframe(df_pred.head(20))
+            st.dataframe(df_pred.head(5))
         except Exception as e:
             st.error(f"No pude leer el CSV. Detalle: {e}")
 
@@ -225,18 +220,37 @@ def main():
                 prob_table = build_prob_table(probas, classes)
                 st.success("Predicción realizada.")
                 st.write("**Probabilidades por fila:**")
-                st.dataframe(prob_table.style.format("{:.2%}"))
+
+                prob_display = prob_table.reset_index(drop=True)
+                meta_df = pd.DataFrame(index=prob_display.index)
+                meta_columns = []
+
+                if "HomeTeam" in df_pred.columns:
+                    meta_df["Equipo local"] = df_pred["HomeTeam"].reset_index(drop=True)
+                    meta_columns.append("Equipo local")
+
+                if "AwayTeam" in df_pred.columns:
+                    meta_df["Equipo visitante"] = df_pred["AwayTeam"].reset_index(drop=True)
+                    meta_columns.append("Equipo visitante")
+
+                if "matchday" in df_pred.columns:
+                    meta_df["Jornada"] = df_pred["matchday"].reset_index(drop=True)
+                    meta_columns.append("Jornada")
+
+                if meta_columns:
+                    meta_display = meta_df[meta_columns]
+                    display_table = pd.concat([meta_display, prob_display], axis=1)
+                else:
+                    display_table = prob_display
+
+                format_dict = {col: "{:.2%}" for col in prob_table.columns}
+                st.dataframe(display_table.style.format(format_dict))
 
                 with st.expander("Descargar resultados (CSV)"):
                     out = pd.concat([df_pred.reset_index(drop=True), prob_table.reset_index(drop=True)], axis=1)
                     csv = out.to_csv(index=False).encode("utf-8")
                     st.download_button("Descargar CSV con probabilidades", csv, file_name="predicciones_con_probabilidades.csv", mime="text/csv")
 
-                # Gráfico rápido para una fila seleccionada
-                st.subheader("Visualización rápida por fila")
-                idx = st.number_input("Elegí el índice de fila a graficar", min_value=0, max_value=len(prob_table)-1, value=0, step=1)
-                row = prob_table.iloc[idx]
-                st.bar_chart(row.to_frame(name="Prob").T)
 
             except Exception as e:
                 st.error(f"Ocurrió un error durante la predicción: {e}")
