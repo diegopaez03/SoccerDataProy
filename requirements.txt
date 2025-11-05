@@ -1,6 +1,6 @@
-# Astro Runtime includes the following pre-installed providers packages: https://www.astronomer.io/docs/astro/runtime-image-architecture#provider-packages
-streamlit
-joblib
-numpy
-pandas
-scikit-learn
+streamlit>=1.36
+pandas>=2.2
+numpy>=1.26
+scikit-learn>=1.4
+matplotlib>=3.9
+joblib>=1.4
