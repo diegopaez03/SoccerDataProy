@@ -18,7 +18,7 @@ from dev.preprocess import preprocessCSV
 # -------------------------------------------------------
 # Config
 # -------------------------------------------------------
-st.set_page_config(page_title="Soccer Predictor", layout="wide")
+st.set_page_config(page_title="Footy Predictor", layout="wide")
 
 # -------------------------------------------------------
 # Utils
