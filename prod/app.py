@@ -1,273 +1,334 @@
 from pathlib import Path
 import sys
 from typing import Optional
-
 import joblib
 import numpy as np
 import pandas as pd
 import streamlit as st
+import altair as alt
 
-# Ensure the project root is importable when running from subdirectories
+st.set_page_config(page_title="Footy Predictor", layout="wide", page_icon="⚽")
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.append(str(ROOT_DIR))
 
-from dev.utils import LegacySelectPreprocessPCA
 from dev.preprocess import preprocessCSV
+from dev.utils import LegacySelectPreprocessPCA
 
-# -------------------------------------------------------
-# Config
-# -------------------------------------------------------
-st.set_page_config(page_title="Footy Predictor", layout="wide")
+# ====== CSS ======
+st.markdown("""
+<style>
+html, body, [class*="css"] {
+  font-family: 'Inter', system-ui, sans-serif;
+}
 
-# -------------------------------------------------------
-# Utils
-# -------------------------------------------------------
+/* ===== Header ===== */
+.header { text-align: center; margin-top: -30px; }
+.header h1 { font-size: 42px; font-weight: 900; color: #2563eb; }
+.header hr { border-top: 1px solid #334155; width: 90%; margin: 4px auto 20px auto; }
 
+/* ===== Sidebar ===== */
+[data-testid="stSidebar"] {
+  background-color: #12275a;
+  padding: 25px 18px;
+  color: white;
+}
+[data-testid="stSidebar"] h3 {
+  color: #fff;
+  font-weight: 800;
+  margin-bottom: 14px;
+  font-size: 20px;
+}
+div[role="radiogroup"] > label {
+  background-color: rgba(255,255,255,0.05);
+  padding: 12px;
+  width: 100%;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  font-size: 17px !important;
+  font-weight: 600;
+  color: white !important;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+div[role="radiogroup"] > label:hover {
+  background-color: rgba(255,255,255,0.12);
+  border: 1px solid #1d4ed8;
+}
+input[type="radio"] { accent-color: #2563eb !important; }
+
+/* ===== Tabs ===== */
+.stTabs { width: 100%; margin-top: 20px; margin-bottom: 25px; }
+.stTabs [data-baseweb="tab-list"] {
+  border-bottom: none !important;
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+}
+.stTabs [data-baseweb="tab"] {
+  background-color: #1e3a8a;
+  color: #e2e8f0;
+  font-size: 18px;
+  font-weight: 700;
+  padding: 12px 28px;
+  border-radius: 10px;
+  transition: all 0.25s ease;
+  border: 2px solid transparent;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+  min-width: 140px;
+  text-align: center;
+}
+.stTabs [data-baseweb="tab"]:hover {
+  background-color: #2563eb;
+  color: white;
+  transform: translateY(-2px);
+}
+.stTabs [aria-selected="true"] {
+  background-color: #2563eb !important;
+  color: white !important;
+  border: 2px solid #60a5fa !important;
+  box-shadow: 0 6px 14px rgba(0,0,0,0.25);
+}
+
+/* ===== Buttons in tables ===== */
+.predict-btn {
+  background-color: #2563eb;
+  color: white;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: 0.25s ease;
+}
+.predict-btn:hover {
+  background-color: #1d4ed8;
+  transform: translateY(-1px);
+}
+
+/* ===== Cards About ===== */
+.card-about {
+  background: linear-gradient(145deg, #1e3a8a, #1d4ed8);
+  padding: 24px;
+  border-radius: 14px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+  margin-bottom: 20px;
+  color: #f8fafc;
+  border-left: 5px solid #60a5fa;
+}
+.card-about b { color: #fff; }
+.card-about ul { margin-top: 10px; margin-bottom: 0; }
+.card-about li { color: #e2e8f0; font-weight: 500; }
+
+/* ===== Section titles ===== */
+.section-title {
+  font-size: 24px;
+  font-weight: 800;
+  color: #2563eb;
+  margin-bottom: 15px;
+}
+
+/* ===== Footer ===== */
+.footer {
+  font-size: 13px;
+  text-align: center;
+  color: #cbd5e1;
+  margin-top: 25px;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ===== Estado =====
+if "pipeline" not in st.session_state:
+    st.session_state.pipeline = None
+if "selected_page" not in st.session_state:
+    st.session_state.selected_page = "⚽ Ligas"
+if "selected_league" not in st.session_state:
+    st.session_state.selected_league = "Premier League"
+
+LEAGUES = ["Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1"]
+
+# ===== Funciones auxiliares =====
 def build_prob_table(probas: np.ndarray, classes: np.ndarray) -> pd.DataFrame:
-    """
-    Convierte las probabilidades (n x k) a un DataFrame con columnas por clase
-    y agrega P_H (Home), P_D (Draw) y P_A (Away).
-    """
     df_probs = pd.DataFrame(probas, columns=classes)
-    # Normalizamos nombres canónicos por si las clases vienen en otro orden
-    # Esperamos clases en {'H','D','A'} (Home, Draw, Away). Si vinieran como otras,
-    # se respetan tal cual, pero calculamos combinadas solo si están.
-    for col in ["H", "D", "A"]:
+    for col in ["H","D","A"]:
         if col not in df_probs.columns:
             df_probs[col] = np.nan
-
-    # Orden amigable si existen
-    ordered = [c for c in ["H", "D", "A"] if c in df_probs.columns]
+    ordered = [c for c in ["H","D","A"] if c in df_probs.columns]
     return df_probs[ordered] if ordered else df_probs
 
-def render_manual_form(pipeline):
-    """
-    Renderiza un formulario para capturar una FILA con los nombres de columnas
-    que el pipeline espera (los features ya seleccionados en entrenamiento).
-    Extrae las listas de features del paso 'legacy_prep' del pipeline.
-    """
-    st.subheader("📝 Cargar un partido manualmente")
-    st.markdown(
-        "Completá los campos y obtené las probabilidades de resultado para **ese** partido."
-    )
 
-    # 1) Obtenemos las listas de features que el pipeline espera
+def render_manual_form(pipeline):
+    st.subheader("📝 Cargar un partido manualmente")
     prep = pipeline.named_steps.get("legacy_prep", None)
     if prep is None:
         st.error("No se encontró el paso 'legacy_prep' en el pipeline.")
         return
-
     cat_feats = list(getattr(prep, "categorical_features_", []))
     num_feats = list(getattr(prep, "numeric_features_", []))
-
-    if not cat_feats and not num_feats:
-        st.warning(
-            "No hay listas de features en 'legacy_prep'. "
-            "¿Seguro que el pipeline fue entrenado con LegacySelectPreprocessPCA y ya está ajustado?"
-        )
-        return
-
-    with st.expander("📋 Campos requeridos (features esperados)", expanded=False):
-        st.write("**Categóricos**:", cat_feats if cat_feats else "(ninguno)")
-        st.write("**Numéricos**:", num_feats if num_feats else "(ninguno)")
-
-    # 2) Formulario de entrada
-    with st.form("single_match_form"):
-        st.markdown("**Completá los valores de entrada**")
-        inputs = {}
-
-        # Campos categóricos: texto
-        if cat_feats:
-            st.markdown("**Categóricos**")
-            cols = st.columns(min(3, len(cat_feats)))
-            for i, col_name in enumerate(cat_feats):
-                with cols[i % len(cols)]:
-                    val = st.text_input(col_name, value="")
-                    inputs[col_name] = val
-
-        # Campos numéricos: number_input
-        if num_feats:
-            st.markdown("**Numéricos**")
-            cols = st.columns(min(3, len(num_feats)))
-            for i, col_name in enumerate(num_feats):
-                with cols[i % len(cols)]:
-                    # number_input devuelve float, podés ajustar step si querés enteros
-                    val = st.number_input(col_name, value=0.0, step=1.0, format="%.6f")
-                    inputs[col_name] = float(val)
-
-        submitted = st.form_submit_button("🔮 Predecir un partido")
-    
-    if not submitted:
-        return
-
-    # 3) Construimos el DataFrame de UNA fila en el orden correcto
-    #    (si faltan columnas, lo avisamos; si sobran, las ignoramos)
-    input_cols = num_feats + cat_feats
-    provided_cols = list(inputs.keys())
-
-    missing = [c for c in input_cols if c not in provided_cols]
-    if missing:
-        st.error(f"Faltan columnas requeridas: {missing}")
-        return
-
-    # Armamos el DF con una sola fila
-    row = {c: inputs[c] for c in input_cols}
-    df_one = pd.DataFrame([row])
-
-    # 4) Predicción de probabilidades
-    try:
+    with st.form("manual_form"):
+        cat_inputs = {c: st.text_input(c, "") for c in cat_feats}
+        num_inputs = {c: st.number_input(c, 0.0) for c in num_feats}
+        submitted = st.form_submit_button("🔮 Predecir partido")
+    if submitted:
+        df_one = pd.DataFrame([{**num_inputs, **cat_inputs}])
         probas = pipeline.predict_proba(df_one)
-        classes = getattr(pipeline.named_steps["model"], "classes_", None)
-        if classes is None:
-            st.error("El estimador final no posee `classes_`. ¿Es un clasificador?")
-            return
+        classes = getattr(pipeline.named_steps["model"], "classes_", [])
+        df_probs = build_prob_table(probas, classes)
+        st.dataframe(df_probs.style.format("{:.2%}"))
+        st.bar_chart(df_probs.iloc[0])
 
-        df_probs = pd.DataFrame(probas, columns=classes)
+# ===== Sección Ligas =====
+def render_ligas():
+    st.markdown('<div class="section-title">⚽ Seleccioná la liga</div>', unsafe_allow_html=True)
+    league = st.selectbox("Liga", LEAGUES, index=LEAGUES.index(st.session_state.selected_league))
+    st.session_state.selected_league = league
 
-        # Normalizamos nombres esperados H/D/A si existen
-        for col in ["H", "D", "A"]:
-            if col not in df_probs.columns:
-                df_probs[col] = np.nan
+    tabs = st.tabs(["📅 Fecha actual", "🏆 Tabla", "📜 Fixture", "📈 Visualizaciones"])
 
-        st.success("✅ Predicción realizada para el partido ingresado.")
-        st.write("**Probabilidades** (una sola fila):")
-        st.dataframe(df_probs[["H","D","A"]].style.format("{:.2%}"))
+    # --- Fecha actual ---
+    with tabs[0]:
+        st.subheader(f"{league} — Fecha actual")
 
-        # Gráfico
-        st.bar_chart(df_probs[["H","D","A"]].iloc[0])
+        df_matches = pd.DataFrame({
+            "Local": ["Arsenal", "Chelsea", "Liverpool", "Man City", "Tottenham"],
+            "Visitante": ["Brighton", "Brentford", "Newcastle", "Aston Villa", "Fulham"],
+            "Predicción de resultado (H/D/A)": ["—", "—", "—", "—", "—"]
+        })
 
-    except Exception as e:
-        st.error(f"Ocurrió un error en la predicción: {e}")
+        # Mostrar tabla con botones de predicción
+        for i, row in df_matches.iterrows():
+            col1, col2, col3, col4 = st.columns([3, 3, 2.5, 1])
+            with col1:
+                st.write(f"**{row['Local']}**")
+            with col2:
+                st.write(f"{row['Visitante']}")
+            with col3:
+                st.write(f"Predicción: {row['Predicción de resultado (H/D/A)']}")
+            with col4:
+                st.markdown(f"<button class='predict-btn'>Predecir</button>", unsafe_allow_html=True)
 
+    # --- Tabla ---
+    with tabs[1]:
+        st.subheader(f"{league} — Tabla de posiciones")
+        df_table = pd.DataFrame({
+            "Pos": range(1,6),
+            "Equipo": ["Man City", "Arsenal", "Liverpool", "Tottenham", "Newcastle"],
+            "PJ": [20,20,20,20,20],
+            "G": [15,14,13,12,10],
+            "E": [4,5,4,5,6],
+            "P": [1,1,3,3,4],
+            "GF": [45,40,42,38,36],
+            "GC": [18,20,25,28,30],
+            "Pts": [49,47,43,41,36]
+        })
+        st.dataframe(df_table, use_container_width=True)
 
-def main():
-    st.title("Pronóstico de partidos de fútbol en ligas")
+    # --- Fixture ---
+    with tabs[2]:
+        st.subheader(f"{league} — Fixture completo (simulado)")
+        jornadas = []
+        for j in range(1,4):
+            jornadas.append(pd.DataFrame({
+                "Jornada": [j]*5,
+                "Local": ["Arsenal","Chelsea","Liverpool","Man City","Tottenham"],
+                "Visitante": ["Brighton","Brentford","Newcastle","Aston Villa","Fulham"]
+            }))
+        for jornada in jornadas:
+            st.markdown(f"### Jornada {int(jornada['Jornada'].iloc[0])}")
+            st.table(jornada.drop(columns="Jornada"))
 
-    # =========================
-    # Intro
-    # =========================
-    with st.container():
-        st.subheader("🔍 ¿Qué hace esta herramienta?")
-        st.markdown("""
-        Esta aplicación permite **estimar las probabilidades de resultado** de partidos de fútbol
-        (Local **H**, Empate **D**, Visitante **A**) usando un **modelo entrenado** (Logistic Regression) encapsulado en un **pipeline de scikit-learn**.
+    # --- Visualizaciones ---
+    with tabs[3]:
+        st.subheader(f"{league} — Visualizaciones")
+        df_viz = pd.DataFrame({
+            "Equipo": ["Man City","Arsenal","Liverpool","Tottenham","Newcastle"],
+            "Rendimiento": [85,82,79,75,70],
+            "Goles_Promedio": [2.4,2.1,2.2,2.0,1.8]
+        })
+        chart1 = alt.Chart(df_viz).mark_bar().encode(
+            x="Equipo", y="Rendimiento", color=alt.Color("Equipo", legend=None)
+        ).properties(title="Rendimiento (%)", width=500, height=300)
+        chart2 = alt.Chart(df_viz).mark_line(point=True).encode(
+            x="Equipo", y="Goles_Promedio", color="Equipo"
+        ).properties(title="Goles promedio por partido", width=500, height=300)
+        st.altair_chart(chart1 | chart2, use_container_width=True)
 
-        > **Importante:** para predecir, cargá un **CSV con las columnas crudas** que usaste al entrenar.
-        El pipeline se encarga de seleccionar features, imputar, escalar, codificar, aplicar **PCA** y predecir.
-        """)
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.info("⚙️ **Pipeline end-to-end**\n\n`select_features` → preprocesamiento → PCA → modelo.")
-    with col2:
-        st.success("📈 **Probabilidades**\n\nObtendrás **P(H), P(D) y P(A)**.")
-    with col3:
-        st.warning("🧪 **Uso educativo**\n\nNo promueve apuestas. El objetivo es didáctico e investigativo.")
-
-    st.subheader("⚙️ ¿Cómo usar la aplicación?")
-    with st.expander("➡️ Ver instrucciones"):
-        st.markdown("""
-        1. **Seleccioná el modelo** (cargá el archivo `.joblib` de tu pipeline).
-        2. **Cargá un CSV** con filas a predecir (mismas columnas crudas del entrenamiento).
-        3. **Presioná “Predecir”** para ver las probabilidades por partido.
-        4. (Opcional) Seleccioná una fila para ver un gráfico rápido.
-        """)
-
-    st.markdown("---")
-    st.header("📌 ¡Predecí tu partido ahora mismo!")
-
-    pipeline = joblib.load("dev/pipeline_logreg_pca_09.joblib")
-
-    render_manual_form(pipeline)
-    
-    # =========================
-    # Carga de datos a predecir
-    # =========================
-    st.subheader("2) Cargar datos (CSV con columnas crudas)")
-    data_file = st.file_uploader("Subí tu archivo CSV", type=["csv"])
-    df_pred: Optional[pd.DataFrame] = None
-    if data_file is not None:
+# ===== Sección Predicción Manual =====
+def render_prediccion_manual():
+    st.markdown('<div class="section-title">🔮 Predicción manual</div>', unsafe_allow_html=True)
+    if st.session_state.pipeline is None:
         try:
-            df_pred = preprocessCSV(pd.read_csv(data_file))
-            st.write("Vista previa de los datos cargados:")
-            st.dataframe(df_pred.head(5))
+            st.session_state.pipeline = joblib.load("dev/pipeline_logreg_pca_09.joblib")
+            st.success("Modelo cargado automáticamente ✅")
         except Exception as e:
-            st.error(f"No pude leer el CSV. Detalle: {e}")
+            st.error(f"No se pudo cargar el modelo: {e}")
+            return
+    pipeline = st.session_state.pipeline
+    tabs = st.tabs(["🧾 CSV", "📝 Manual"])
 
-    st.markdown("---")
-
-    # =========================
-    # Predicción
-    # =========================
-    st.subheader("3) Predicción de probabilidades")
-    colp1, colp2 = st.columns([1,2])
-
-    if pipeline is None:
-        colp1.warning("⛔ Primero cargá un **modelo**.")
-    elif df_pred is None:
-        colp1.warning("⛔ Falta cargar el **CSV** con datos.")
-    else:
-        if st.button("🔮 Predecir", type="primary"):
-            try:
-                # predict_proba y clases
+    with tabs[0]:
+        st.subheader("📂 Cargar CSV con columnas crudas")
+        data_file = st.file_uploader("Subí tu archivo CSV", type=["csv"])
+        if data_file:
+            df_pred = preprocessCSV(pd.read_csv(data_file))
+            st.dataframe(df_pred.head())
+            if st.button("🔮 Predecir desde CSV"):
                 probas = pipeline.predict_proba(df_pred)
-                # clases vienen del estimador final dentro del pipeline
-                classes = getattr(pipeline.named_steps["model"], "classes_", None)
-                if classes is None:
-                    raise RuntimeError("El estimador final no tiene atributo `classes_`. ¿Es un clasificador?")
-
+                classes = pipeline.named_steps["model"].classes_
                 prob_table = build_prob_table(probas, classes)
-                st.success("Predicción realizada.")
-                st.write("**Probabilidades por fila:**")
+                st.dataframe(prob_table.style.format("{:.2%}"))
 
-                prob_display = prob_table.reset_index(drop=True)
-                meta_df = pd.DataFrame(index=prob_display.index)
-                meta_columns = []
+    with tabs[1]:
+        render_manual_form(pipeline)
 
-                if "HomeTeam" in df_pred.columns:
-                    meta_df["Equipo local"] = df_pred["HomeTeam"].reset_index(drop=True)
-                    meta_columns.append("Equipo local")
-
-                if "AwayTeam" in df_pred.columns:
-                    meta_df["Equipo visitante"] = df_pred["AwayTeam"].reset_index(drop=True)
-                    meta_columns.append("Equipo visitante")
-
-                if "matchday" in df_pred.columns:
-                    meta_df["Jornada"] = df_pred["matchday"].reset_index(drop=True)
-                    meta_columns.append("Jornada")
-
-                if meta_columns:
-                    meta_display = meta_df[meta_columns]
-                    display_table = pd.concat([meta_display, prob_display], axis=1)
-                else:
-                    display_table = prob_display
-
-                format_dict = {col: "{:.2%}" for col in prob_table.columns}
-                st.dataframe(display_table.style.format(format_dict))
-
-                with st.expander("Descargar resultados (CSV)"):
-                    out = pd.concat([df_pred.reset_index(drop=True), prob_table.reset_index(drop=True)], axis=1)
-                    csv = out.to_csv(index=False).encode("utf-8")
-                    st.download_button("Descargar CSV con probabilidades", csv, file_name="predicciones_con_probabilidades.csv", mime="text/csv")
-
-
-            except Exception as e:
-                st.error(f"Ocurrió un error durante la predicción: {e}")
-
-    # =========================
-    # Advertencia + créditos
-    # =========================
     st.markdown("---")
-    st.subheader("⚠️ A tener en cuenta")
-    st.warning("""
-    ❗​ Esta herramienta no promueve su uso para apuestas deportivas ni de ningún tipo.
-    Su uso es **puramente educativo** y busca apoyar el aprendizaje de **machine learning**.
-    """)
+    st.warning("❗ Esta herramienta tiene fines educativos. No promueve apuestas deportivas.")
 
-    st.markdown("<hr>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center;'>Hecho por Diego Paez y Nicolas Carcaño</p>", unsafe_allow_html=True)
+# ===== Sección About =====
+def render_about():
+    st.markdown('<div class="section-title">ℹ️ Acerca del proyecto</div>', unsafe_allow_html=True)
+    st.markdown("""
+<div class="card-about">
+<b>Footy Predictor</b> es una aplicación educativa para el análisis y predicción de partidos de fútbol en las 5 grandes ligas europeas.  
+Utiliza Machine Learning (Logistic Regression + PCA) y visualizaciones interactivas para explorar patrones en los resultados.
+</div>
 
-if __name__ == "__main__":
-    main()
+<div class="card-about">
+<b>🎯 Objetivo</b><br>
+Analizar datos reales del fútbol europeo y generar predicciones H/D/A (local, empate, visitante) de manera automatizada.
+</div>
 
+<div class="card-about">
+<b>🧠 Tecnologías</b>
+<ul>
+<li>Python 3.11</li>
+<li>Streamlit</li>
+<li>Scikit-learn</li>
+<li>Pandas / Numpy</li>
+<li>Altair</li>
+</ul>
+</div>
+
+<div class="card-about">
+<b>👨‍💻 Autores</b><br>
+Diego Páez y Nicolás Carcaño  
+UTN — Facultad Regional Mendoza (2025)
+</div>
+""", unsafe_allow_html=True)
+    st.markdown('<div class="footer">© 2025 Footy Predictor — Proyecto académico</div>', unsafe_allow_html=True)
+
+# ===== Layout =====
+st.markdown('<div class="header"><h1>Footy Predictor</h1><hr></div>', unsafe_allow_html=True)
+with st.sidebar:
+    st.markdown("### ⚙️ Navegación")
+    page = st.radio("", ["⚽ Ligas", "🧮 Predicción manual", "ℹ️ Acerca"])
+    st.session_state.selected_page = page
+
+if st.session_state.selected_page == "⚽ Ligas":
+    render_ligas()
+elif st.session_state.selected_page == "🧮 Predicción manual":
+    render_prediccion_manual()
+elif st.session_state.selected_page == "ℹ️ Acerca":
+    render_about()
