@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import Pipeline
 from sklearn.decomposition import PCA
@@ -6,6 +6,8 @@ from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 import numpy as np
 import pandas as pd
+import warnings
+warnings.filterwarnings('ignore')
 
 class LegacySelectPreprocessPCA(BaseEstimator, TransformerMixin):
     """

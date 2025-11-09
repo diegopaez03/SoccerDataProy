@@ -6,15 +6,38 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import altair as alt
+from dotenv import load_dotenv
+import warnings
+warnings.filterwarnings('ignore')
 
-st.set_page_config(page_title="Footy Predictor", layout="wide", page_icon="⚽")
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.append(str(ROOT_DIR))
 
+load_dotenv(ROOT_DIR / ".env")
+
 from dev.preprocess import preprocessCSV
 from dev.utils import LegacySelectPreprocessPCA
+from prod.football_data_client import (
+    FootballDataAPIError,
+    FootballDataClient,
+    latest_matchday_df,
+    standings_to_dataframe,
+)
+
+st.set_page_config(page_title="Footy Predictor", layout="wide", page_icon="⚽")
+
+LEAGUES = ["Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1"]
+API_LEAGUES = [
+    {"label": "Premier League", "code": "PL"},
+    {"label": "La Liga", "code": "PD"},
+    {"label": "Serie A", "code": "SA"},
+    {"label": "Bundesliga", "code": "BL1"},
+    {"label": "Ligue 1", "code": "FL1"},
+]
+API_LEAGUE_CODE_INDEX = {opt["code"]: idx for idx, opt in enumerate(API_LEAGUES)}
+HISTORY_CSV_PATH = ROOT_DIR / 'data' / 'ALL_top5_20seasons_consolidated.csv'
 
 # ====== CSS ======
 st.markdown("""
@@ -139,15 +162,23 @@ input[type="radio"] { accent-color: #2563eb !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ===== Estado =====
+# ===== Estado ======
 if "pipeline" not in st.session_state:
     st.session_state.pipeline = None
 if "selected_page" not in st.session_state:
     st.session_state.selected_page = "⚽ Ligas"
 if "selected_league" not in st.session_state:
     st.session_state.selected_league = "Premier League"
+if "selected_api_league" not in st.session_state:
+    st.session_state.selected_api_league = API_LEAGUES[0]["code"]
 
-LEAGUES = ["Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1"]
+@st.cache_data(show_spinner=False)
+def load_history_data(path: Path) -> pd.DataFrame:
+    return pd.read_csv(path)
+
+@st.cache_resource(show_spinner=False)
+def get_football_data_client(token: Optional[str] = None) -> FootballDataClient:
+    return FootballDataClient(token=token)
 
 # ===== Funciones auxiliares =====
 def build_prob_table(probas: np.ndarray, classes: np.ndarray) -> pd.DataFrame:
@@ -179,81 +210,180 @@ def render_manual_form(pipeline):
         st.dataframe(df_probs.style.format("{:.2%}"))
         st.bar_chart(df_probs.iloc[0])
 
+
+# ===== Seccion Informe Modelos =====
+def render_model_report():
+    st.markdown('<div class="section-title">Informe comparativo de modelos</div>', unsafe_allow_html=True)
+    st.write("Usa esta vista para documentar el rendimiento de los distintos modelos entrenados. Los datos mostrados son de ejemplo para que completes el informe mas adelante.")
+
+    models_df = pd.DataFrame([
+        {'Modelo': 'LogReg + PCA', 'Accuracy': 0.61, 'F1_macro': 0.58, 'ROC_AUC': 0.66},
+        {'Modelo': 'Random Forest', 'Accuracy': 0.64, 'F1_macro': 0.60, 'ROC_AUC': 0.69},
+        {'Modelo': 'XGBoost', 'Accuracy': 0.67, 'F1_macro': 0.63, 'ROC_AUC': 0.72},
+    ])
+    st.markdown('#### Tabla resumen (demo)')
+    st.dataframe(
+        models_df.style.format({'Accuracy': '{:.2%}', 'F1_macro': '{:.2%}', 'ROC_AUC': '{:.2f}'}),
+        hide_index=True,
+    )
+
+    st.markdown('#### Visualizacion de metricas (demo)')
+    metrics_long = models_df.melt(id_vars='Modelo', var_name='Metrica', value_name='Score')
+    chart = (
+        alt.Chart(metrics_long)
+        .mark_bar()
+        .encode(
+            x=alt.X('Modelo:N', title='Modelo'),
+            y=alt.Y('Score:Q', title='Valor'),
+            color='Metrica:N',
+            column=alt.Column('Metrica:N', title=None),
+        )
+        .properties(height=240)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+    st.markdown('#### Proximos pasos')
+    st.info("Reemplaza la tabla y el grafico con metricas reales (por ejemplo, importando un CSV con resultados de experimentos). Podes sumar graficas adicionales como matrices de confusion, curvas ROC y analisis de error.")
+
+
 # ===== Sección Ligas =====
 def render_ligas():
-    st.markdown('<div class="section-title">⚽ Seleccioná la liga</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Visualizaciones</div>', unsafe_allow_html=True)
     league = st.selectbox("Liga", LEAGUES, index=LEAGUES.index(st.session_state.selected_league))
     st.session_state.selected_league = league
 
-    tabs = st.tabs(["📅 Fecha actual", "🏆 Tabla", "📜 Fixture", "📈 Visualizaciones"])
+    st.subheader('Visualizaciones con datos historicos')
+    if not HISTORY_CSV_PATH.exists():
+        st.warning(f"No se encontro el archivo {HISTORY_CSV_PATH}.")
+    else:
+        try:
+            history_df = load_history_data(HISTORY_CSV_PATH)
+        except Exception as exc:
+            st.error(f'No se pudo leer el CSV: {exc}')
+            history_df = None
+        else:
+            st.markdown('#### Vista previa')
+            st.dataframe(history_df.head(25), use_container_width=True)
 
-    # --- Fecha actual ---
-    with tabs[0]:
-        st.subheader(f"{league} — Fecha actual")
+            st.markdown('#### Resumen rapido')
+            info_cols = st.columns(3)
+            info_cols[0].metric('Filas', f"{len(history_df):,}")
+            info_cols[1].metric('Columnas', f"{len(history_df.columns):,}")
+            info_cols[2].metric('Ultima carga', pd.Timestamp.utcnow().strftime('%d/%m/%Y %H:%M UTC'))
 
-        df_matches = pd.DataFrame({
-            "Local": ["Arsenal", "Chelsea", "Liverpool", "Man City", "Tottenham"],
-            "Visitante": ["Brighton", "Brentford", "Newcastle", "Aston Villa", "Fulham"],
-            "Predicción de resultado (H/D/A)": ["—", "—", "—", "—", "—"]
-        })
+            st.markdown('#### Espacio reservado para nuevas visualizaciones')
+            st.info('Agrega aqui tus graficos personalizados usando este dataset.')
 
-        # Mostrar tabla con botones de predicción
-        for i, row in df_matches.iterrows():
-            col1, col2, col3, col4 = st.columns([3, 3, 2.5, 1])
-            with col1:
-                st.write(f"**{row['Local']}**")
-            with col2:
-                st.write(f"{row['Visitante']}")
-            with col3:
-                st.write(f"Predicción: {row['Predicción de resultado (H/D/A)']}")
-            with col4:
-                st.markdown(f"<button class='predict-btn'>Predecir</button>", unsafe_allow_html=True)
+# ===== Seccion Datos API =====
+def render_api_data():
+    st.markdown('<div class="section-title">Tablas y predicción</div>', unsafe_allow_html=True)
 
-    # --- Tabla ---
-    with tabs[1]:
-        st.subheader(f"{league} — Tabla de posiciones")
-        df_table = pd.DataFrame({
-            "Pos": range(1,6),
-            "Equipo": ["Man City", "Arsenal", "Liverpool", "Tottenham", "Newcastle"],
-            "PJ": [20,20,20,20,20],
-            "G": [15,14,13,12,10],
-            "E": [4,5,4,5,6],
-            "P": [1,1,3,3,4],
-            "GF": [45,40,42,38,36],
-            "GC": [18,20,25,28,30],
-            "Pts": [49,47,43,41,36]
-        })
-        st.dataframe(df_table, use_container_width=True)
+    league_labels = [opt["label"] for opt in API_LEAGUES]
+    label_to_code = {opt["label"]: opt["code"] for opt in API_LEAGUES}
+    default_index = API_LEAGUE_CODE_INDEX.get(st.session_state.selected_api_league, 0)
+    selected_label = st.selectbox(
+        "Liga",
+        league_labels,
+        index=default_index,
+        help="Datos provistos por el endpoint /competitions/{code}/standings",
+    )
+    selected_code = label_to_code[selected_label]
+    st.session_state.selected_api_league = selected_code
 
-    # --- Fixture ---
-    with tabs[2]:
-        st.subheader(f"{league} — Fixture completo (simulado)")
-        jornadas = []
-        for j in range(1,4):
-            jornadas.append(pd.DataFrame({
-                "Jornada": [j]*5,
-                "Local": ["Arsenal","Chelsea","Liverpool","Man City","Tottenham"],
-                "Visitante": ["Brighton","Brentford","Newcastle","Aston Villa","Fulham"]
-            }))
-        for jornada in jornadas:
-            st.markdown(f"### Jornada {int(jornada['Jornada'].iloc[0])}")
-            st.table(jornada.drop(columns="Jornada"))
+    try:
+        client = get_football_data_client()
+    except FootballDataAPIError as exc:
+        st.error(f"No se pudo inicializar el cliente del API: {exc}")
+        st.info("Crea un token gratuito y configuralo como FOOTBALL_DATA_API_TOKEN.")
+        return
+    except Exception as exc:
+        st.error(f"Error inesperado al inicializar el cliente: {exc}")
+        return
 
-    # --- Visualizaciones ---
-    with tabs[3]:
-        st.subheader(f"{league} — Visualizaciones")
-        df_viz = pd.DataFrame({
-            "Equipo": ["Man City","Arsenal","Liverpool","Tottenham","Newcastle"],
-            "Rendimiento": [85,82,79,75,70],
-            "Goles_Promedio": [2.4,2.1,2.2,2.0,1.8]
-        })
-        chart1 = alt.Chart(df_viz).mark_bar().encode(
-            x="Equipo", y="Rendimiento", color=alt.Color("Equipo", legend=None)
-        ).properties(title="Rendimiento (%)", width=500, height=300)
-        chart2 = alt.Chart(df_viz).mark_line(point=True).encode(
-            x="Equipo", y="Goles_Promedio", color="Equipo"
-        ).properties(title="Goles promedio por partido", width=500, height=300)
-        st.altair_chart(chart1 | chart2, use_container_width=True)
+    st.subheader("Tabla de posiciones")
+    standings_df = pd.DataFrame()
+    try:
+        with st.spinner("Descargando posiciones desde Football-Data.org..."):
+            payload = client.get_standings(selected_code)
+        standings_df = standings_to_dataframe(payload)
+    except FootballDataAPIError as exc:
+        st.error(f"No se pudo obtener la tabla de posiciones: {exc}")
+    except Exception as exc:
+        st.error(f"Error inesperado al consultar standings: {exc}")
+
+    if standings_df.empty:
+        st.info("No hay datos de posiciones disponibles para esta competencia.")
+    else:
+        standings_display = standings_df.rename(
+            columns={
+                "position": "Pos",
+                "team": "Equipo",
+                "played": "PJ",
+                "won": "G",
+                "draw": "E",
+                "lost": "P",
+                "goals_for": "GF",
+                "goals_against": "GC",
+                "goal_diff": "DG",
+                "points": "Pts",
+            }
+        )[["Pos", "Equipo", "PJ", "G", "E", "P", "GF", "GC", "DG", "Pts"]]
+        st.dataframe(standings_display, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.subheader("Predecir próxima fecha")
+    matches_df = pd.DataFrame()
+    try:
+        with st.spinner("Cargando la ultima jornada disputada..."):
+            matches_df = latest_matchday_df(client, selected_code)
+    except FootballDataAPIError as exc:
+        st.error(f"No se pudieron obtener los partidos: {exc}")
+        return
+    except Exception as exc:
+        st.error(f"Error inesperado al consultar partidos: {exc}")
+        return
+
+    if matches_df.empty:
+        st.info("Aun no hay partidos finalizados para mostrar.")
+        return
+    matches_df = matches_df.copy()
+    matches_df["utc_date"] = pd.to_datetime(matches_df["utc_date"], errors="coerce")
+    matchday = matches_df["matchday"].dropna().max()
+    if pd.notna(matchday):
+        st.caption(f"Jornada {int(matchday)} - Fuente: Football-Data.org")
+
+    def _format_date(dt_value):
+        if pd.isna(dt_value):
+            return "-"
+        return dt_value.strftime("%d/%m/%Y %H:%M")
+
+    def _render_logo(column, url: Optional[str]):
+        if url:
+            column.image(url, width=38)
+        else:
+            column.write("—")
+
+    header_cols = st.columns([1.6, 0.7, 0.7, 2.2, 0.7, 2.2, 0.6])
+    header_cols[0].markdown("**Fecha**")
+    header_cols[1].markdown("**Jornada**")
+    header_cols[2].write("")
+    header_cols[3].markdown("**Local**")
+    header_cols[4].write("")
+    header_cols[5].markdown("**Visitante**")
+    header_cols[6].markdown("**Predecir**")
+
+    for _, row in matches_df.sort_values("utc_date").iterrows():
+        col_fecha, col_matchday, col_home_logo, col_home_name, col_away_logo, col_away_name, col_btn = st.columns(
+            [1.6, 0.7, 0.7, 2.2, 0.7, 2.2, 0.6]
+        )
+        col_fecha.markdown(f"**{_format_date(row.get('utc_date'))}**")
+        md_label = f"{int(row['matchday'])}" if pd.notna(row.get("matchday")) else "MD -"
+        col_matchday.markdown(md_label)
+        _render_logo(col_home_logo, row.get("home_team_logo"))
+        col_home_name.markdown(f"**{row.get('home_team', 'N/D')}**")
+        _render_logo(col_away_logo, row.get("away_team_logo"))
+        col_away_name.markdown(row.get("away_team", "N/D"))
+        col_btn.button("⚡", key=f"predict_{row.get('match_id')}", help="Calcular predicción")
 
 # ===== Sección Predicción Manual =====
 def render_prediccion_manual():
@@ -261,7 +391,7 @@ def render_prediccion_manual():
     if st.session_state.pipeline is None:
         try:
             st.session_state.pipeline = joblib.load("dev/pipeline_logreg_pca_09.joblib")
-            st.success("Modelo cargado automáticamente ✅")
+            st.success("Modelo cargado automáticamente")
         except Exception as e:
             st.error(f"No se pudo cargar el modelo: {e}")
             return
@@ -322,13 +452,17 @@ UTN — Facultad Regional Mendoza (2025)
 # ===== Layout =====
 st.markdown('<div class="header"><h1>Footy Predictor</h1><hr></div>', unsafe_allow_html=True)
 with st.sidebar:
-    st.markdown("### ⚙️ Navegación")
-    page = st.radio("", ["⚽ Ligas", "🧮 Predicción manual", "ℹ️ Acerca"])
+    st.markdown("### 🚀 Navegación")
+    page = st.radio("", [ "Tablas y predicción", "Visualizaciones", "Informe de modelos", "Predicción manual", "Acerca"])
     st.session_state.selected_page = page
 
-if st.session_state.selected_page == "⚽ Ligas":
+if st.session_state.selected_page == "Visualizaciones":
     render_ligas()
-elif st.session_state.selected_page == "🧮 Predicción manual":
+elif st.session_state.selected_page == "Tablas y predicción":
+    render_api_data()
+elif st.session_state.selected_page == "Informe de modelos":
+    render_model_report()
+elif st.session_state.selected_page == "Predicción manual":
     render_prediccion_manual()
-elif st.session_state.selected_page == "ℹ️ Acerca":
+elif st.session_state.selected_page == "Acerca":
     render_about()

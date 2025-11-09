@@ -53,33 +53,15 @@ class FootballDataClient:
 
     def get_matches(
         self,
-        competition_code: Optional[str] = None,
-        status: Optional[str] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
-        matchday: Optional[int] = None,
-        team_id: Optional[int] = None,
-        season: Optional[int] = None,
+        competition_code: str,
     ) -> Dict[str, Any]:
         params: Dict[str, Any] = {}
-        if status:
-            params["status"] = status
-        if date_from:
-            params["dateFrom"] = date_from
-        if date_to:
-            params["dateTo"] = date_to
-        if matchday:
-            params["matchday"] = matchday
-        if team_id:
-            params["teams"] = team_id
-        if season:
-            params["season"] = season
 
-        if competition_code:
-            endpoint = f"/competitions/{competition_code}/matches"
-        else:
-            endpoint = "/matches"
-        return self._request(endpoint, params)
+        params["season"] = 2025
+        params["dateFrom"] = '2025-01-01'
+        params["dateTo"] = '2026-12-31'
+
+        return self._request(f"/competitions/{competition_code}/matches", params)
 
     def get_team(self, team_id: int) -> Dict[str, Any]:
         return self._request(f"/teams/{team_id}")
@@ -178,6 +160,8 @@ def matches_to_dataframe(payload: Dict[str, Any]) -> pd.DataFrame:
                 "away_team": away.get("shortName") or away.get("name"),
                 "home_team_id": home.get("id"),
                 "away_team_id": away.get("id"),
+                "home_team_logo": home.get("crest"),
+                "away_team_logo": away.get("crest"),
                 "full_time_home": full_time.get("home"),
                 "full_time_away": full_time.get("away"),
                 "winner": (score.get("winner") or "").lower(),
@@ -192,18 +176,33 @@ def matches_to_dataframe(payload: Dict[str, Any]) -> pd.DataFrame:
 
 
 def latest_matchday_df(client: FootballDataClient, competition_code: str) -> pd.DataFrame:
-    """Devuelve un DataFrame con la ultima jornada disponible para la liga."""
-    payload = client.get_matches(competition_code=competition_code, status="FINISHED")
+    """
+    Azucar sintáctico: trae la última jornada disponible y devuelve un DataFrame listo
+    para mostrar en la sección de ligas.
+    """
+    payload = client.get_matches(competition_code=competition_code)
     df = matches_to_dataframe(payload)
-    if df.empty or "matchday" not in df.columns:
-        return df
-
-    df = df.dropna(subset=["matchday"])
+    
     if df.empty:
+        print('No se encontró dataframe')
         return df
 
-    last_matchday = df["matchday"].max()
-    return df[df["matchday"] == last_matchday].sort_values("utc_date")
+    # Group by matchday and count TIMED matches
+    timed_matches_count = df[df['status'] != 'FINISHED'].groupby('matchday').size()
+
+    # Find the first matchday with at least 3 TIMED matches
+    target_matchday = None
+    for matchday, count in timed_matches_count.items():
+        if count >= 3:
+            target_matchday = matchday
+            break
+
+    if target_matchday is None:
+        print("No matchday found with at least 3 'TIMED' matches.")
+        return pd.DataFrame()
+
+    # Return all matches for the target matchday, sorted by date
+    return df[df["matchday"] == target_matchday].sort_values("utc_date")
 
 
 __all__ = [
