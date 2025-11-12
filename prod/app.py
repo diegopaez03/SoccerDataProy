@@ -291,7 +291,7 @@ def render_ligas():
     info_cols[2].metric('Ultima carga', pd.Timestamp.utcnow().strftime('%d/%m/%Y %H:%M UTC'))
 
     # ===== Distribución de resultados por equipo local =====
-    st.markdown('#### Distribución de resultados por equipo local (normalizada)')
+    st.markdown('#### Resultados por equipo jugando como local')
 
     league_df_local = league_df_global[
         league_df_global["HomeTeam"].notna() & (league_df_global["HomeTeam"] != "null")
@@ -365,7 +365,7 @@ def render_ligas():
         st.info("El dataset no contiene datos suficientes para equipos locales en esta liga.")
 
     # ===== Distribución de resultados por equipo visitante =====
-    st.markdown('#### Distribución de resultados por equipo visitante (normalizada)')
+    st.markdown('#### Resultados por equipo jugando como visitante')
 
     league_df_visit = league_df_global[
         league_df_global["AwayTeam"].notna() & (league_df_global["AwayTeam"] != "null")
