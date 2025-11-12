@@ -249,30 +249,293 @@ def render_model_report():
 # ===== Sección Ligas =====
 def render_ligas():
     st.markdown('<div class="section-title">Visualizaciones</div>', unsafe_allow_html=True)
+
+    # Selector global de liga (ya existía, lo mantenemos)
     league = st.selectbox("Liga", LEAGUES, index=LEAGUES.index(st.session_state.selected_league))
     st.session_state.selected_league = league
 
     st.subheader('Visualizaciones con datos historicos')
+
     if not HISTORY_CSV_PATH.exists():
         st.warning(f"No se encontro el archivo {HISTORY_CSV_PATH}.")
+        return
+
+    try:
+        history_df = load_history_data(HISTORY_CSV_PATH)
+    except Exception as exc:
+        st.error(f'No se pudo leer el CSV: {exc}')
+        return
+
+    # Mapeo liga UI -> nombre en CSV (antes repetido en cada bloque)
+    LEAGUE_MAP = {
+        "Premier League": "England",
+        "La Liga": "Spain",
+        "Serie A": "Italy",
+        "Bundesliga": "Germany",
+        "Ligue 1": "France",
+    }
+
+    # Filtrar una sola vez según la liga elegida
+    csv_league_name = LEAGUE_MAP.get(league, league)
+    league_df_global = history_df[history_df["league"] == csv_league_name].copy()
+
+    # ===== Vista previa (ahora filtrada por liga seleccionada) =====
+    st.markdown('#### Vista previa')
+    st.dataframe(league_df_global.head(25), use_container_width=True)
+
+    # ===== Resumen rapido (también sobre la liga filtrada) =====
+    st.markdown('#### Resumen rapido')
+    info_cols = st.columns(3)
+    info_cols[0].metric('Filas', f"{len(league_df_global):,}")
+    info_cols[1].metric('Columnas', f"{len(league_df_global.columns):,}")
+    info_cols[2].metric('Ultima carga', pd.Timestamp.utcnow().strftime('%d/%m/%Y %H:%M UTC'))
+
+    # ===== Distribución de resultados por equipo local =====
+    st.markdown('#### Distribución de resultados por equipo local (normalizada)')
+
+    league_df_local = league_df_global[
+        league_df_global["HomeTeam"].notna() & (league_df_global["HomeTeam"] != "null")
+    ].copy()
+
+    if "HomeTeam" in league_df_local.columns and "FTR" in league_df_local.columns and not league_df_local.empty:
+        def resultado_local(row):
+            if row["FTR"] == "H":
+                return "Victoria"
+            elif row["FTR"] == "D":
+                return "Empate"
+            else:
+                return "Derrota"
+
+        league_df_local["Resultado"] = league_df_local.apply(resultado_local, axis=1)
+
+        win_rates_local = (
+            league_df_local[league_df_local["Resultado"] == "Victoria"]
+            .groupby("HomeTeam")
+            .size()
+            .div(league_df_local.groupby("HomeTeam").size())
+            .sort_values(ascending=False)
+            .index.tolist()
+        )
+
+        chart_local = (
+            alt.Chart(league_df_local)
+            .transform_aggregate(
+                count="count()",
+                groupby=["HomeTeam", "Resultado"]
+            )
+            .transform_joinaggregate(
+                total_per_team="sum(count)",
+                groupby=["HomeTeam"]
+            )
+            .transform_calculate(
+                porcentaje="datum.count / datum.total_per_team"
+            )
+            .mark_bar()
+            .encode(
+                x=alt.X(
+                    "HomeTeam:N",
+                    title="Equipo local",
+                    sort=win_rates_local,
+                    axis=alt.Axis(labelAngle=270, labelFontSize=11)
+                ),
+                y=alt.Y(
+                    "porcentaje:Q",
+                    title="Porcentaje de resultados",
+                    axis=alt.Axis(format='%')
+                ),
+                color=alt.Color(
+                    "Resultado:N",
+                    title="Resultado",
+                    scale=alt.Scale(
+                        domain=["Victoria", "Empate", "Derrota"],
+                        range=["#1b9e77", "#c7b800", "#d95f02"]
+                    )
+                ),
+                tooltip=[
+                    alt.Tooltip("HomeTeam:N", title="Equipo local"),
+                    alt.Tooltip("Resultado:N", title="Resultado"),
+                    alt.Tooltip("count:Q", title="Cantidad", format="d"),
+                    alt.Tooltip("porcentaje:Q", title="Porcentaje", format=".1%")
+                ]
+            )
+            .properties(width=950, height=450)
+        )
+        st.altair_chart(chart_local, use_container_width=True)
     else:
-        try:
-            history_df = load_history_data(HISTORY_CSV_PATH)
-        except Exception as exc:
-            st.error(f'No se pudo leer el CSV: {exc}')
-            history_df = None
-        else:
-            st.markdown('#### Vista previa')
-            st.dataframe(history_df.head(25), use_container_width=True)
+        st.info("El dataset no contiene datos suficientes para equipos locales en esta liga.")
 
-            st.markdown('#### Resumen rapido')
-            info_cols = st.columns(3)
-            info_cols[0].metric('Filas', f"{len(history_df):,}")
-            info_cols[1].metric('Columnas', f"{len(history_df.columns):,}")
-            info_cols[2].metric('Ultima carga', pd.Timestamp.utcnow().strftime('%d/%m/%Y %H:%M UTC'))
+    # ===== Distribución de resultados por equipo visitante =====
+    st.markdown('#### Distribución de resultados por equipo visitante (normalizada)')
 
-            st.markdown('#### Espacio reservado para nuevas visualizaciones')
-            st.info('Agrega aqui tus graficos personalizados usando este dataset.')
+    league_df_visit = league_df_global[
+        league_df_global["AwayTeam"].notna() & (league_df_global["AwayTeam"] != "null")
+    ].copy()
+
+    if "AwayTeam" in league_df_visit.columns and "FTR" in league_df_visit.columns and not league_df_visit.empty:
+        def resultado_visitante(row):
+            if row["FTR"] == "A":
+                return "Victoria"
+            elif row["FTR"] == "D":
+                return "Empate"
+            else:
+                return "Derrota"
+
+        league_df_visit["Resultado"] = league_df_visit.apply(resultado_visitante, axis=1)
+
+        win_rates_visit = (
+            league_df_visit[league_df_visit["Resultado"] == "Victoria"]
+            .groupby("AwayTeam")
+            .size()
+            .div(league_df_visit.groupby("AwayTeam").size())
+            .sort_values(ascending=False)
+            .index.tolist()
+        )
+
+        chart_visit = (
+            alt.Chart(league_df_visit)
+            .transform_aggregate(
+                count="count()",
+                groupby=["AwayTeam", "Resultado"]
+            )
+            .transform_joinaggregate(
+                total_per_team="sum(count)",
+                groupby=["AwayTeam"]
+            )
+            .transform_calculate(
+                porcentaje="datum.count / datum.total_per_team"
+            )
+            .mark_bar()
+            .encode(
+                x=alt.X(
+                    "AwayTeam:N",
+                    title="Equipo visitante",
+                    sort=win_rates_visit,
+                    axis=alt.Axis(labelAngle=270, labelFontSize=11)
+                ),
+                y=alt.Y(
+                    "porcentaje:Q",
+                    title="Porcentaje de resultados",
+                    axis=alt.Axis(format='%')
+                ),
+                color=alt.Color(
+                    "Resultado:N",
+                    title="Resultado",
+                    scale=alt.Scale(
+                        domain=["Victoria", "Empate", "Derrota"],
+                        range=["#1b9e77", "#c7b800", "#d95f02"]
+                    )
+                ),
+                tooltip=[
+                    alt.Tooltip("AwayTeam:N", title="Equipo visitante"),
+                    alt.Tooltip("Resultado:N", title="Resultado"),
+                    alt.Tooltip("count:Q", title="Cantidad", format="d"),
+                    alt.Tooltip("porcentaje:Q", title="Porcentaje", format=".1%")
+                ]
+            )
+            .properties(width=950, height=450)
+        )
+        st.altair_chart(chart_visit, use_container_width=True)
+    else:
+        st.info("El dataset no contiene datos suficientes para equipos visitantes en esta liga.")
+
+    # ===== Historial de enfrentamientos por equipo =====
+    st.markdown('#### Historial de enfrentamientos por equipo')
+
+    league_df = league_df_global[
+        league_df_global["HomeTeam"].notna() &
+        league_df_global["AwayTeam"].notna()
+    ].copy()
+
+    if league_df.empty:
+        st.info("No hay datos de enfrentamientos para esta liga.")
+        return
+
+    equipos = sorted(
+        pd.unique(league_df["HomeTeam"].dropna().tolist() + league_df["AwayTeam"].dropna().tolist())
+    )
+    equipo_sel = st.selectbox("Seleccioná el equipo", equipos)
+
+    team_matches = league_df[
+        (league_df["HomeTeam"] == equipo_sel) | (league_df["AwayTeam"] == equipo_sel)
+    ].copy()
+
+    if not team_matches.empty:
+        def resultado_vs(row):
+            if row["HomeTeam"] == equipo_sel:
+                if row["FTR"] == "H":
+                    return "Victoria"
+                elif row["FTR"] == "D":
+                    return "Empate"
+                else:
+                    return "Derrota"
+            else:
+                if row["FTR"] == "A":
+                    return "Victoria"
+                elif row["FTR"] == "D":
+                    return "Empate"
+                else:
+                    return "Derrota"
+
+        def rival_de(row):
+            return row["AwayTeam"] if row["HomeTeam"] == equipo_sel else row["HomeTeam"]
+
+        team_matches["Resultado"] = team_matches.apply(resultado_vs, axis=1)
+        team_matches["Rival"] = team_matches.apply(rival_de, axis=1)
+
+        resumen = (
+            team_matches.groupby(["Rival", "Resultado"])
+            .size()
+            .reset_index(name="Cantidad")
+        )
+
+        total_jugados = resumen.groupby("Rival")["Cantidad"].sum().reset_index(name="Total")
+        resumen = resumen.merge(total_jugados, on="Rival")
+        resumen["Porcentaje"] = resumen["Cantidad"] / resumen["Total"]
+
+        porcentaje_victorias = (
+            resumen[resumen["Resultado"] == "Victoria"]
+            .set_index("Rival")["Porcentaje"]
+            .reindex(resumen["Rival"].unique(), fill_value=0)
+        )
+
+        rivales_ordenados = porcentaje_victorias.sort_values(ascending=False).index.tolist()
+
+        chart_historial = (
+            alt.Chart(resumen)
+            .mark_bar()
+            .encode(
+                x=alt.X(
+                    "Rival:N",
+                    sort=rivales_ordenados,
+                    title="Rival",
+                    axis=alt.Axis(labelAngle=270, labelFontSize=11)
+                ),
+                y=alt.Y(
+                    "Porcentaje:Q",
+                    title="Porcentaje de resultados",
+                    axis=alt.Axis(format='%')
+                ),
+                color=alt.Color(
+                    "Resultado:N",
+                    title="Resultado",
+                    scale=alt.Scale(
+                        domain=["Victoria", "Empate", "Derrota"],
+                        range=["#1b9e77", "#c7b800", "#d95f02"]
+                    )
+                ),
+                tooltip=[
+                    alt.Tooltip("Rival:N", title="Rival"),
+                    alt.Tooltip("Resultado:N", title="Resultado"),
+                    alt.Tooltip("Cantidad:Q", title="Cantidad", format="d"),
+                    alt.Tooltip("Porcentaje:Q", title="Porcentaje", format=".1%"),
+                    alt.Tooltip("Total:Q", title="Total jugados", format="d")
+                ]
+            )
+            .properties(width=950, height=450)
+        )
+        st.altair_chart(chart_historial, use_container_width=True)
+    else:
+        st.info(f"No se encontraron partidos históricos del equipo {equipo_sel} en {league}.")
 
 # ===== Seccion Datos API =====
 def render_api_data():
