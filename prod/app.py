@@ -348,7 +348,7 @@ def render_ligas():
                     title="Resultado",
                     scale=alt.Scale(
                         domain=["Victoria", "Empate", "Derrota"],
-                        range=["#1b9e77", "#c7b800", "#d95f02"]
+                        range=["#1b9e77", "#c7b800", "#ff3737"]
                     )
                 ),
                 tooltip=[
@@ -422,7 +422,7 @@ def render_ligas():
                     title="Resultado",
                     scale=alt.Scale(
                         domain=["Victoria", "Empate", "Derrota"],
-                        range=["#1b9e77", "#c7b800", "#d95f02"]
+                        range=["#1b9e77", "#c7b800", "#ff3737"]
                     )
                 ),
                 tooltip=[
@@ -520,7 +520,7 @@ def render_ligas():
                     title="Resultado",
                     scale=alt.Scale(
                         domain=["Victoria", "Empate", "Derrota"],
-                        range=["#1b9e77", "#c7b800", "#d95f02"]
+                        range=["#1b9e77", "#c7b800", "#ff3737"]
                     )
                 ),
                 tooltip=[
