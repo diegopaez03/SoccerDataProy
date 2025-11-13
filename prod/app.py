@@ -254,7 +254,7 @@ def render_ligas():
     league = st.selectbox("Liga", LEAGUES, index=LEAGUES.index(st.session_state.selected_league))
     st.session_state.selected_league = league
 
-    st.subheader('Visualizaciones con datos historicos')
+    st.subheader('Visualizaciones con datos desde la temporada 06/07 a la actualidad')
 
     if not HISTORY_CSV_PATH.exists():
         st.warning(f"No se encontro el archivo {HISTORY_CSV_PATH}.")
@@ -451,15 +451,20 @@ def render_ligas():
         return
 
     equipos = sorted(
-        pd.unique(league_df["HomeTeam"].dropna().tolist() + league_df["AwayTeam"].dropna().tolist())
+        pd.unique(
+            league_df["HomeTeam"].dropna().tolist() +
+            league_df["AwayTeam"].dropna().tolist()
+        )
     )
     equipo_sel = st.selectbox("Seleccioná el equipo", equipos)
 
     team_matches = league_df[
-        (league_df["HomeTeam"] == equipo_sel) | (league_df["AwayTeam"] == equipo_sel)
+        (league_df["HomeTeam"] == equipo_sel) |
+        (league_df["AwayTeam"] == equipo_sel)
     ].copy()
 
     if not team_matches.empty:
+
         def resultado_vs(row):
             if row["HomeTeam"] == equipo_sel:
                 if row["FTR"] == "H":
@@ -488,7 +493,12 @@ def render_ligas():
             .reset_index(name="Cantidad")
         )
 
-        total_jugados = resumen.groupby("Rival")["Cantidad"].sum().reset_index(name="Total")
+        total_jugados = (
+            resumen.groupby("Rival")["Cantidad"]
+            .sum()
+            .reset_index(name="Total")
+        )
+
         resumen = resumen.merge(total_jugados, on="Rival")
         resumen["Porcentaje"] = resumen["Cantidad"] / resumen["Total"]
 
@@ -533,9 +543,154 @@ def render_ligas():
             )
             .properties(width=950, height=450)
         )
+
         st.altair_chart(chart_historial, use_container_width=True)
+
     else:
         st.info(f"No se encontraron partidos históricos del equipo {equipo_sel} en {league}.")
+
+    
+
+    # ===== Comparación entre dos equipos (Radar Chart general) =====
+    st.markdown("### Comparador general entre equipos")
+
+    # Usamos directamente el dataframe ya filtrado por liga
+    league_df = league_df_global.copy()
+
+    equipos = sorted(
+        pd.unique(
+            league_df["HomeTeam"].dropna().tolist() +
+            league_df["AwayTeam"].dropna().tolist()
+        )
+    )
+
+    colA, colB = st.columns(2)
+    with colA:
+        equipo_a = st.selectbox("Equipo A", equipos, key="radar_team_a")
+    with colB:
+        equipo_b = st.selectbox("Equipo B", equipos, key="radar_team_b")
+
+    if equipo_a != equipo_b:
+
+        # Función para extraer estadísticas del equipo (local/visitante)
+        def stats_por_equipo(df, equipo):
+            registros = []
+
+            for _, row in df.iterrows():
+                if row["HomeTeam"] == equipo:
+                    registros.append({
+                        "Team": equipo,
+                        "GF": row["FTHG"],
+                        "GA": row["FTAG"],
+                        "Shots": row["HS"],
+                        "ShotsOnTarget": row["HST"],
+                        "Fouls": row["HF"],
+                        "Corners": row["HC"],
+                        "Yellow": row["HY"],
+                        "Red": row["HR"]
+                    })
+                elif row["AwayTeam"] == equipo:
+                    registros.append({
+                        "Team": equipo,
+                        "GF": row["FTAG"],
+                        "GA": row["FTHG"],
+                        "Shots": row["AS"],
+                        "ShotsOnTarget": row["AST"],
+                        "Fouls": row["AF"],
+                        "Corners": row["AC"],
+                        "Yellow": row["AY"],
+                        "Red": row["AR"]
+                    })
+
+            df_stats = pd.DataFrame(registros)
+            if df_stats.empty:
+                return None
+
+            return (
+                df_stats.mean(numeric_only=True)
+                .reset_index()
+                .rename(columns={0: "Value"})
+            )
+
+        df_a = stats_por_equipo(league_df, equipo_a)
+        df_b = stats_por_equipo(league_df, equipo_b)
+
+        if df_a is None or df_b is None:
+            st.info("No hay datos suficientes para ambos equipos en esta liga.")
+        else:
+            # Construimos tabla para radar
+            radar_df = pd.concat([
+                df_a.assign(Team=equipo_a),
+                df_b.assign(Team=equipo_b)
+            ])
+
+            # Reemplazar NaN → fundamental para que el radar no colapse
+            radar_df = radar_df.fillna(0)
+
+            metric_labels = {
+                "GF": "Goles a favor",
+                "GA": "Goles en contra",
+                "Shots": "Tiros",
+                "ShotsOnTarget": "Tiros al arco",
+                "Fouls": "Faltas",
+                "Corners": "Córners",
+                "Yellow": "Amarillas",
+                "Red": "Rojas"
+            }
+
+            radar_df["MetricLabel"] = radar_df["index"].map(metric_labels)
+
+            # Escala radial dinámica (visible en TODOS los casos)
+            max_val = radar_df["Value"].max()
+            if max_val < 5:
+                max_val = 5
+            elif max_val < 10:
+                max_val = 10
+            else:
+                max_val = round(max_val + 2)
+
+            # ===== Radar grande, visible y relleno =====
+            radar_chart = (
+                alt.Chart(radar_df, title="Comparativa promedio por partido")
+                .mark_area(opacity=0.25)
+                .encode(
+                    theta=alt.Theta(
+                        "MetricLabel:N",
+                        sort=list(metric_labels.values())
+                    ),
+                    radius=alt.Radius(
+                        "Value:Q",
+                        scale=alt.Scale(domain=[0, max_val], nice=False)
+                    ),
+                    color=alt.Color("Team:N", title="Equipo"),
+                    tooltip=[
+                        alt.Tooltip("Team:N", title="Equipo"),
+                        alt.Tooltip("MetricLabel:N", title="Métrica"),
+                        alt.Tooltip("Value:Q", title="Prom. por partido", format=".2f"),
+                    ]
+                )
+                .properties(
+                    width=650,
+                    height=650,
+                    background="#f2f2f2",
+                    padding={"left": 40, "right": 40, "top": 40, "bottom": 40}
+                )
+                .configure_view(stroke=None)
+                .configure_title(
+                    fontSize=22,
+                    color="black",
+                    anchor="start"
+                )
+            )
+
+            st.altair_chart(radar_chart)
+
+    else:
+        st.info("Elegí dos equipos distintos para comparar.")
+
+
+
+
 
 # ===== Seccion Datos API =====
 def render_api_data():
