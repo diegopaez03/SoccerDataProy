@@ -231,3 +231,244 @@ def select_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str], list[str
     numeric_features = df.select_dtypes(include=["number"]).columns.tolist()
 
     return df, categorical_features, numeric_features
+
+import pandas as pd
+
+def build_match_row_from_api(api_json: dict,
+                             home_team_id: int,
+                             away_team_id: int,
+                             meta: dict | None = None,
+                             streak_window: int = 5) -> pd.DataFrame:
+    """
+    Construye una fila con TODAS las columnas de csvFiltrado:
+      - columnas *_pre a partir de standings (type == 'TOTAL')
+      - columnas adicionales (Div, HomeTeam, AwayTeam, etc.)
+
+    api_json      : dict con la respuesta de standings (response.json()).
+    home_team_id  : id del equipo local (team.id).
+    away_team_id  : id del equipo visitante.
+    meta          : dict opcional para completar columnas no 'pre'
+                    (por ej. {'Div': 'E0', 'HomeTeam':'Man City', ...})
+    """
+
+    if meta is None:
+        meta = {}
+
+    # =========================
+    # 1) Indexar standings TOTAL por ID
+    # =========================
+    total_idx = {}
+    for block in api_json.get("standings", []):
+        if block.get("type") != "TOTAL":
+            continue
+        for row in block.get("table", []):
+            tid = row["team"]["id"]
+            total_idx[int(tid)] = row
+
+    def get_total_row(tid: int):
+        tid = int(tid)
+        if tid not in total_idx:
+            raise ValueError(f"No se encontró el equipo con id {tid} en standings TOTAL")
+        return total_idx[tid]
+
+    # =========================
+    # 2) Helpers
+    # =========================
+    def extract_basic_stats(row):
+        return {
+            "matches": row.get("playedGames", 0),
+            "wins":    row.get("won", 0),
+            "draws":   row.get("draw", 0),
+            "losses":  row.get("lost", 0),
+            "gf":      row.get("goalsFor", 0),
+            "ga":      row.get("goalsAgainst", 0),
+            "points":  row.get("points", 0),
+            "form":    row.get("form") or ""
+        }
+
+    def extract_streak_counts(form_str: str, window: int = 5):
+        if not form_str:
+            return {"W": 0, "D": 0, "L": 0}
+        tokens = [t.strip() for t in form_str.split(",") if t.strip()]
+        if not tokens:
+            return {"W": 0, "D": 0, "L": 0}
+        last = tokens[-window:]
+        return {
+            "W": last.count("W"),
+            "D": last.count("D"),
+            "L": last.count("L"),
+        }
+
+    def split_value(total: int, frac_home: float):
+        home = int(round(total * frac_home))
+        away = total - home
+        return home, away
+
+    def derive_home_away_from_total(stats: dict):
+        wins_home, wins_away       = split_value(stats["wins"],   0.60)
+        draws_home, draws_away     = split_value(stats["draws"],  0.50)
+        losses_home, losses_away   = split_value(stats["losses"], 0.40)
+        gf_home, gf_away           = split_value(stats["gf"],     0.55)
+        ga_home, ga_away           = split_value(stats["ga"],     0.45)
+
+        home_stats = {
+            "wins": wins_home, "draws": draws_home, "losses": losses_home,
+            "gf": gf_home, "ga": ga_home
+        }
+        away_stats = {
+            "wins": wins_away, "draws": draws_away, "losses": losses_away,
+            "gf": gf_away, "ga": ga_away
+        }
+        return home_stats, away_stats
+
+    # =========================
+    # 3) Stats para local y visitante
+    # =========================
+    h_total = extract_basic_stats(get_total_row(home_team_id))
+    a_total = extract_basic_stats(get_total_row(away_team_id))
+
+    h_home, h_away = derive_home_away_from_total(h_total)
+    a_home, a_away = derive_home_away_from_total(a_total)
+
+    h_streak = extract_streak_counts(h_total["form"], streak_window)
+    a_streak = extract_streak_counts(a_total["form"], streak_window)
+
+    # =========================
+    # 4) Construir fila con TODAS las columnas
+    # =========================
+    row: dict = {}
+
+    # ---- columnas NO 'pre' (14) ----
+    # las incluyo explícitamente, con valor meta.get(...) o un default neutro
+    row["Div"]               = meta.get("Div", None)
+    row["HomeTeam"]          = meta.get("HomeTeam", None)
+    row["AwayTeam"]          = meta.get("AwayTeam", None)
+    row["match_date"]        = meta.get("match_date", None)
+    row["league"]            = meta.get("league", None)
+    row["season"]            = meta.get("season", None)
+    row["Date_raw"]          = meta.get("Date_raw", None)
+    row["season_start"]      = meta.get("season_start", None)
+    row["season_end"]        = meta.get("season_end", None)
+    row["team_match_no_home"]= h_total["wins"] + h_total["draws"] + h_total["losses"]
+    row["team_match_no_away"]= a_total["wins"] + a_total["draws"] + a_total["losses"]
+    row["matchday"]          = meta.get("matchday", None)
+    row["match_id"]          = meta.get("match_id", None)
+
+    # ---- TOTAL HOME ----
+    row["wins_home_pre"]            = h_total["wins"]
+    row["draws_home_pre"]           = h_total["draws"]
+    row["losses_home_pre"]          = h_total["losses"]
+    row["goals_for_home_pre"]       = h_total["gf"]
+    row["goals_against_home_pre"]   = h_total["ga"]
+    row["streak_W_home_pre"]        = h_streak["W"]
+    row["streak_D_home_pre"]        = h_streak["D"]
+    row["streak_L_home_pre"]        = h_streak["L"]
+
+    # ---- TOTAL AWAY ----
+    row["wins_away_pre"]            = a_total["wins"]
+    row["draws_away_pre"]           = a_total["draws"]
+    row["losses_away_pre"]          = a_total["losses"]
+    row["goals_for_away_pre"]       = a_total["gf"]
+    row["goals_against_away_pre"]   = a_total["ga"]
+    row["streak_W_away_pre"]        = a_streak["W"]
+    row["streak_D_away_pre"]        = a_streak["D"]
+    row["streak_L_away_pre"]        = a_streak["L"]
+
+    # ---- HOME derivado ----
+    row["wins_home_home_pre"]              = h_home["wins"]
+    row["draws_home_home_pre"]             = h_home["draws"]
+    row["losses_home_home_pre"]            = h_home["losses"]
+    row["goals_for_home_home_pre"]         = h_home["gf"]
+    row["goals_against_home_home_pre"]     = h_home["ga"]
+
+    row["wins_away_home_pre"]              = a_home["wins"]
+    row["draws_away_home_pre"]             = a_home["draws"]
+    row["losses_away_home_pre"]            = a_home["losses"]
+    row["goals_for_away_home_pre"]         = a_home["gf"]
+    row["goals_against_away_home_pre"]     = a_home["ga"]
+
+    # ---- AWAY derivado ----
+    row["wins_home_away_pre"]              = h_away["wins"]
+    row["draws_home_away_pre"]             = h_away["draws"]
+    row["losses_home_away_pre"]            = h_away["losses"]
+    row["goals_for_home_away_pre"]         = h_away["gf"]
+    row["goals_against_home_away_pre"]     = h_away["ga"]
+
+    row["wins_away_away_pre"]              = a_away["wins"]
+    row["draws_away_away_pre"]             = a_away["draws"]
+    row["losses_away_away_pre"]            = a_away["losses"]
+    row["goals_for_away_away_pre"]         = a_away["gf"]
+    row["goals_against_away_away_pre"]     = a_away["ga"]
+
+    # ---- Partidos y puntos ----
+    row["matches_home_pre"] = h_total["matches"]
+    row["matches_away_pre"] = a_total["matches"]
+    row["matches_pre"]      = row["matches_home_pre"] + row["matches_away_pre"]
+
+    row["points_home_pre"]  = h_total["points"]
+    row["points_away_pre"]  = a_total["points"]
+    row["points_pre"]       = row["points_home_pre"] + row["points_away_pre"]
+
+    # Orden de columnas igual al csv: primero no-pre, luego todas las *_pre
+    all_cols_order = [
+        # no-pre
+        'Unnamed: 0',
+        'Div',
+        'HomeTeam',
+        'AwayTeam',
+        'match_date',
+        'league',
+        'season',
+        'Date_raw',
+        'season_start',
+        'season_end',
+        'team_match_no_home',
+        'team_match_no_away',
+        'matchday',
+        'match_id',
+        # pre
+        "wins_home_pre",
+        "draws_home_pre",
+        "losses_home_pre",
+        "goals_for_home_pre",
+        "goals_against_home_pre",
+        "wins_home_home_pre",
+        "wins_away_home_pre",
+        "draws_home_home_pre",
+        "draws_away_home_pre",
+        "losses_home_home_pre",
+        "losses_away_home_pre",
+        "goals_for_home_home_pre",
+        "goals_for_away_home_pre",
+        "goals_against_home_home_pre",
+        "goals_against_away_home_pre",
+        "streak_W_home_pre",
+        "streak_D_home_pre",
+        "streak_L_home_pre",
+        "wins_away_pre",
+        "draws_away_pre",
+        "losses_away_pre",
+        "goals_for_away_pre",
+        "goals_against_away_pre",
+        "wins_home_away_pre",
+        "wins_away_away_pre",
+        "draws_home_away_pre",
+        "draws_away_away_pre",
+        "losses_home_away_pre",
+        "losses_away_away_pre",
+        "goals_for_home_away_pre",
+        "goals_for_away_away_pre",
+        "goals_against_home_away_pre",
+        "goals_against_away_away_pre",
+        "streak_W_away_pre",
+        "streak_D_away_pre",
+        "streak_L_away_pre",
+        "matches_home_pre",
+        "matches_away_pre",
+        "matches_pre",
+        "points_home_pre",
+        "points_away_pre",
+        "points_pre",
+    ]
+
+    return pd.DataFrame([row], columns=all_cols_order)

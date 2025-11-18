@@ -18,7 +18,7 @@ if str(ROOT_DIR) not in sys.path:
 load_dotenv(ROOT_DIR / ".env")
 
 from dev.preprocess import preprocessCSV
-from dev.utils import LegacySelectPreprocessPCA
+from dev.utils import LegacySelectPreprocessPCA, build_match_row_from_api
 from prod.football_data_client import (
     FootballDataAPIError,
     FootballDataClient,
@@ -26,7 +26,7 @@ from prod.football_data_client import (
     standings_to_dataframe,
 )
 
-st.set_page_config(page_title="Footy Predictor", layout="wide", page_icon="⚽")
+st.set_page_config(page_title="Footy Predictor", layout="wide", page_icon="â½")
 
 LEAGUES = ["Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1"]
 API_LEAGUES = [
@@ -38,6 +38,23 @@ API_LEAGUES = [
 ]
 API_LEAGUE_CODE_INDEX = {opt["code"]: idx for idx, opt in enumerate(API_LEAGUES)}
 HISTORY_CSV_PATH = ROOT_DIR / 'data' / 'ALL_top5_20seasons_consolidated.csv'
+PIPELINE_PATH = ROOT_DIR / 'dev' / 'pipeline_logreg_pca_09.joblib'
+
+DIVISION_CODES = {
+    'PL': 'E0',
+    'PD': 'SP1',
+    'SA': 'I1',
+    'BL1': 'D1',
+    'FL1': 'F1',
+}
+
+LEAGUE_TO_CSV = {
+    'Premier League': 'England',
+    'La Liga': 'Spain',
+    'Serie A': 'Italy',
+    'Bundesliga': 'Germany',
+    'Ligue 1': 'France',
+}
 
 # ====== CSS ======
 st.markdown("""
@@ -54,7 +71,7 @@ html, body, [class*="css"] {
 /* ===== Sidebar ===== */
 [data-testid="stSidebar"] {
   background-color: #12275a;
-  padding: 25px 18px;
+  padding: 25px 0px;
   color: white;
 }
 [data-testid="stSidebar"] h3 {
@@ -63,23 +80,51 @@ html, body, [class*="css"] {
   margin-bottom: 14px;
   font-size: 20px;
 }
-div[role="radiogroup"] > label {
-  background-color: rgba(255,255,255,0.05);
-  padding: 12px;
-  width: 100%;
-  margin-bottom: 8px;
-  border-radius: 8px;
-  font-size: 17px !important;
-  font-weight: 600;
-  color: white !important;
+div[role="radiogroup"] {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 5px;
+  margin: -5px auto 24px auto;
+  backdrop-filter: blur(12px);
+  max-width: 700px;
+}
+div[role="radiogroup"] > label[data-baseweb="radio"] {
+  background: transparent;
+  color: #e2e8f0 !important;
+  padding: 10px 15px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
   cursor: pointer;
-  border: 1px solid transparent;
+  transition: all .2s ease;
+  font-size: 15px !important;
+  font-weight: 700;
+  letter-spacing: 0.4px;
 }
-div[role="radiogroup"] > label:hover {
-  background-color: rgba(255,255,255,0.12);
-  border: 1px solid #1d4ed8;
+div[role="radiogroup"] > label[data-baseweb="radio"] > div:first-child {
+  display: none !important;
 }
-input[type="radio"] { accent-color: #2563eb !important; }
+div[role="radiogroup"] > label[data-baseweb="radio"]:hover {
+  border-color: rgba(37, 99, 235, 0.9);
+  background: rgba(37, 99, 235, 0.12);
+  color: #f8fafc !important;
+}
+div[role="radiogroup"] > label[data-baseweb="radio"][aria-checked="true"] {
+  background: #2563eb;
+  color: #0f172a !important;
+  border-color: #2563eb;
+  box-shadow: 0 8px 20px rgba(37, 99, 235, 0.35);
+}
+div[role="radiogroup"] > label[data-baseweb="radio"][aria-checked="true"]:hover {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
+}
+input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
 
 /* ===== Tabs ===== */
 .stTabs { width: 100%; margin-top: 20px; margin-bottom: 25px; }
@@ -166,11 +211,16 @@ input[type="radio"] { accent-color: #2563eb !important; }
 if "pipeline" not in st.session_state:
     st.session_state.pipeline = None
 if "selected_page" not in st.session_state:
-    st.session_state.selected_page = "⚽ Ligas"
+    st.session_state.selected_page = "â½ Ligas"
 if "selected_league" not in st.session_state:
     st.session_state.selected_league = "Premier League"
 if "selected_api_league" not in st.session_state:
     st.session_state.selected_api_league = API_LEAGUES[0]["code"]
+
+if "pipeline_error" not in st.session_state:
+    st.session_state.pipeline_error = None
+if "last_api_prediction" not in st.session_state:
+    st.session_state.last_api_prediction = None
 
 @st.cache_data(show_spinner=False)
 def load_history_data(path: Path) -> pd.DataFrame:
@@ -190,8 +240,89 @@ def build_prob_table(probas: np.ndarray, classes: np.ndarray) -> pd.DataFrame:
     return df_probs[ordered] if ordered else df_probs
 
 
+def get_prediction_pipeline():
+    if st.session_state.pipeline is None:
+        try:
+            st.session_state.pipeline = joblib.load(PIPELINE_PATH)
+            st.session_state.pipeline_error = None
+        except Exception as exc:
+            st.session_state.pipeline_error = str(exc)
+            return None
+    return st.session_state.pipeline
+
+
+def _parse_year(date_str):
+    if not date_str:
+        return None
+    try:
+        return pd.to_datetime(date_str).year
+    except Exception:
+        return None
+
+
+def _season_code(start_year, end_year):
+    if start_year and end_year:
+        return int(f"{start_year % 100:02d}{end_year % 100:02d}")
+    return start_year or end_year
+
+
+def _build_meta_from_match(row, league_label, competition_code, season_info):
+    start_year = _parse_year(season_info.get('startDate'))
+    end_year = _parse_year(season_info.get('endDate'))
+    if start_year is None:
+        start_year = _parse_year(row.get('season'))
+    if end_year is None and start_year is not None:
+        end_year = start_year + 1
+    match_dt = None
+    if row.get('utc_date') is not None:
+        try:
+            match_dt = pd.to_datetime(row.get('utc_date'))
+        except Exception:
+            match_dt = None
+    match_date_str = match_dt.strftime('%Y-%m-%d') if match_dt is not None else row.get('utc_date')
+    season_value = _season_code(start_year, end_year)
+    league_csv = LEAGUE_TO_CSV.get(league_label, league_label)
+    meta = {
+        'Div': DIVISION_CODES.get(competition_code, competition_code),
+        'HomeTeam': row.get('home_team'),
+        'AwayTeam': row.get('away_team'),
+        'match_date': match_date_str,
+        'league': league_csv,
+        'season': season_value,
+        'Date_raw': match_date_str,
+        'season_start': start_year,
+        'season_end': end_year,
+        'matchday': int(row['matchday']) if pd.notna(row.get('matchday')) else None,
+        'match_id': int(row['match_id']) if pd.notna(row.get('match_id')) else None,
+    }
+    return meta
+
+
+def predict_match_from_api(row, standings_payload, competition_code, league_label):
+    pipeline = get_prediction_pipeline()
+    if pipeline is None:
+        raise RuntimeError(st.session_state.pipeline_error or 'No se pudo cargar el modelo.')
+    home_id = row.get('home_team_id')
+    away_id = row.get('away_team_id')
+    if pd.isna(home_id) or pd.isna(away_id):
+        raise ValueError('No se encontraron los IDs de equipos para el partido seleccionado.')
+    meta = _build_meta_from_match(row, league_label, competition_code, standings_payload.get('season', {}))
+    features_df = build_match_row_from_api(standings_payload, int(home_id), int(away_id), meta=meta)
+    probas = pipeline.predict_proba(features_df)
+    classes = getattr(pipeline.named_steps['model'], 'classes_', [])
+    prob_table = build_prob_table(probas, classes)
+    predicted_label = prob_table.iloc[0].idxmax() if not prob_table.empty else None
+    return {
+        'home': row.get('home_team'),
+        'away': row.get('away_team'),
+        'matchday': row.get('matchday'),
+        'probabilities': prob_table,
+        'label': predicted_label,
+    }
+
+
 def render_manual_form(pipeline):
-    st.subheader("📝 Cargar un partido manualmente")
+    st.subheader("ð Cargar un partido manualmente")
     prep = pipeline.named_steps.get("legacy_prep", None)
     if prep is None:
         st.error("No se encontró el paso 'legacy_prep' en el pipeline.")
@@ -201,7 +332,7 @@ def render_manual_form(pipeline):
     with st.form("manual_form"):
         cat_inputs = {c: st.text_input(c, "") for c in cat_feats}
         num_inputs = {c: st.number_input(c, 0.0) for c in num_feats}
-        submitted = st.form_submit_button("🔮 Predecir partido")
+        submitted = st.form_submit_button("ð® Predecir partido")
     if submitted:
         df_one = pd.DataFrame([{**num_inputs, **cat_inputs}])
         probas = pipeline.predict_proba(df_one)
@@ -246,11 +377,11 @@ def render_model_report():
     st.info("Reemplaza la tabla y el grafico con metricas reales (por ejemplo, importando un CSV con resultados de experimentos). Podes sumar graficas adicionales como matrices de confusion, curvas ROC y analisis de error.")
 
 
-# ===== Sección Ligas =====
+# ===== Sección Visualizaciones =====
 def render_ligas():
     st.markdown('<div class="section-title">Visualizaciones</div>', unsafe_allow_html=True)
 
-    # Selector global de liga (ya existía, lo mantenemos)
+    # Selector global de liga
     league = st.selectbox("Liga", LEAGUES, index=LEAGUES.index(st.session_state.selected_league))
     st.session_state.selected_league = league
 
@@ -266,18 +397,9 @@ def render_ligas():
         st.error(f'No se pudo leer el CSV: {exc}')
         return
 
-    # Mapeo liga UI -> nombre en CSV (antes repetido en cada bloque)
-    LEAGUE_MAP = {
-        "Premier League": "England",
-        "La Liga": "Spain",
-        "Serie A": "Italy",
-        "Bundesliga": "Germany",
-        "Ligue 1": "France",
-    }
-
-    # Filtrar una sola vez según la liga elegida
-    csv_league_name = LEAGUE_MAP.get(league, league)
-    league_df_global = history_df[history_df["league"] == csv_league_name].copy()
+    # Filtrar una sola vez segun la liga elegida
+    csv_league_name = LEAGUE_TO_CSV.get(league, league)
+    league_df_global = history_df[history_df['league'] == csv_league_name].copy()
 
     # ===== Vista previa (ahora filtrada por liga seleccionada) =====
     st.markdown('#### Vista previa')
@@ -289,6 +411,129 @@ def render_ligas():
     info_cols[0].metric('Filas', f"{len(league_df_global):,}")
     info_cols[1].metric('Columnas', f"{len(league_df_global.columns):,}")
     info_cols[2].metric('Ultima carga', pd.Timestamp.utcnow().strftime('%d/%m/%Y %H:%M UTC'))
+
+    # ===== Evolución de puntos por temporada =====
+    st.markdown('---')
+    st.markdown('#### Evolución de puntos por jornada')
+    st.markdown('**Interactivo**')
+    required_cols = {
+        "season_start", "season_end", "matchday", "FTR",
+        "HomeTeam", "AwayTeam", "points_home_pre", "points_away_pre"
+    }
+    missing_cols = [col for col in required_cols if col not in league_df_global.columns]
+
+    if missing_cols:
+        st.info(f"Faltan columnas para construir la evolución de puntos: {', '.join(missing_cols)}.")
+    else:
+        season_catalog = (
+            league_df_global[["season_start", "season_end"]]
+            .dropna()
+            .drop_duplicates()
+            .sort_values("season_start")
+            .copy()
+        )
+
+        if season_catalog.empty:
+            st.info("No hay temporadas disponibles para esta liga.")
+        else:
+            def _format_season(row):
+                try:
+                    start = int(row["season_start"])
+                    end = int(row["season_end"])
+                    return f"{start}/{end % 100:02d}"
+                except (TypeError, ValueError):
+                    return f"{row['season_start']} - {row['season_end']}"
+
+            season_catalog["season_label"] = season_catalog.apply(_format_season, axis=1)
+            season_labels = season_catalog["season_label"].tolist()
+            default_idx = len(season_labels) - 1 if season_labels else 0
+            selected_label = st.selectbox("Temporada", season_labels, index=default_idx)
+
+            season_row = season_catalog[season_catalog["season_label"] == selected_label].iloc[0]
+            season_mask = (
+                (league_df_global["season_start"] == season_row["season_start"]) &
+                (league_df_global["season_end"] == season_row["season_end"])
+            )
+            season_df = league_df_global.loc[season_mask].copy()
+
+            if season_df.empty:
+                st.info("No hay partidos para la temporada seleccionada.")
+            else:
+                season_df = season_df.sort_values(["matchday", "Date"])
+                result_points = {"H": (3, 0), "D": (1, 1), "A": (0, 3)}
+                point_records = []
+
+                for _, row in season_df.iterrows():
+                    matchday = row.get("matchday")
+                    if pd.isna(matchday):
+                        continue
+                    try:
+                        matchday = int(matchday)
+                    except (TypeError, ValueError):
+                        continue
+
+                    ftr = row.get("FTR")
+                    home_gain, away_gain = result_points.get(ftr, (0, 0))
+
+                    for team_col, points_col, gain in [
+                        ("HomeTeam", "points_home_pre", home_gain),
+                        ("AwayTeam", "points_away_pre", away_gain),
+                    ]:
+                        team = row.get(team_col)
+                        if pd.isna(team) or team == "null":
+                            continue
+                        pre_points = row.get(points_col)
+                        if pd.isna(pre_points):
+                            continue
+
+                        point_records.append({
+                            "Team": team,
+                            "Matchday": matchday,
+                            "Points": float(pre_points + gain),
+                            "Season": selected_label,
+                        })
+
+                if not point_records:
+                    st.info("No se pudieron calcular puntos acumulados para esta temporada.")
+                else:
+                    points_df = pd.DataFrame(point_records)
+                    ranking = (
+                        points_df.groupby("Team")["Points"]
+                        .max()
+                        .sort_values(ascending=False)
+                    )
+                    team_options = ranking.index.tolist()
+                    default_selection = team_options[:5] if len(team_options) >= 5 else team_options
+                    selected_teams = st.multiselect(
+                        "Equipos a mostrar",
+                        team_options,
+                        default=default_selection,
+                        help="ElegÃ­ qué equipos comparar en la progresión de puntos."
+                    )
+
+                    plot_df = points_df if not selected_teams else points_df[points_df["Team"].isin(selected_teams)]
+
+                    if plot_df.empty:
+                        st.info("Seleccioná al menos un equipo para visualizar la curva de puntos.")
+                    else:
+                        chart_points = (
+                            alt.Chart(plot_df)
+                            .mark_line(point=alt.OverlayMarkDef(size=35))
+                            .encode(
+                                x=alt.X("Matchday:Q", title="Jornada"),
+                                y=alt.Y("Points:Q", title="Puntos acumulados"),
+                                color=alt.Color("Team:N", title="Equipo"),
+                                tooltip=[
+                                    alt.Tooltip("Season:N", title="Temporada"),
+                                    alt.Tooltip("Team:N", title="Equipo"),
+                                    alt.Tooltip("Matchday:Q", title="Jornada"),
+                                    alt.Tooltip("Points:Q", title="Puntos", format="d"),
+                                ]
+                            )
+                            .properties(width=950, height=450)
+                            .interactive()
+                        )
+                        st.altair_chart(chart_points, use_container_width=True)
 
     # ===== Distribución de resultados por equipo local =====
     st.markdown('#### Resultados por equipo jugando como local')
@@ -572,7 +817,7 @@ def render_ligas():
 
     if equipo_a != equipo_b:
 
-        # Función para extraer estadísticas del equipo (local/visitante)
+        # Función para extraer estadÃ­sticas del equipo (local/visitante)
         def stats_por_equipo(df, equipo):
             registros = []
 
@@ -624,7 +869,7 @@ def render_ligas():
                 df_b.assign(Team=equipo_b)
             ])
 
-            # Reemplazar NaN → fundamental para que el radar no colapse
+            # Reemplazar NaN â fundamental para que el radar no colapse
             radar_df = radar_df.fillna(0)
 
             metric_labels = {
@@ -686,7 +931,7 @@ def render_ligas():
             st.altair_chart(radar_chart)
 
     else:
-        st.info("Elegí dos equipos distintos para comparar.")
+        st.info("ElegÃ­ dos equipos distintos para comparar.")
 
 
 
@@ -729,6 +974,11 @@ def render_api_data():
     except Exception as exc:
         st.error(f"Error inesperado al consultar standings: {exc}")
 
+    standings_payload = locals().get('payload') if 'payload' in locals() else None
+    if standings_payload is None:
+        st.error("No se pudieron recuperar los standings para esta liga.")
+        return
+
     if standings_df.empty:
         st.info("No hay datos de posiciones disponibles para esta competencia.")
     else:
@@ -765,8 +1015,8 @@ def render_api_data():
         st.info("Aun no hay partidos finalizados para mostrar.")
         return
     matches_df = matches_df.copy()
-    matches_df["utc_date"] = pd.to_datetime(matches_df["utc_date"], errors="coerce")
-    matchday = matches_df["matchday"].dropna().max()
+    matches_df['utc_date'] = pd.to_datetime(matches_df['utc_date'], errors='coerce')
+    matchday = matches_df['matchday'].dropna().max()
     if pd.notna(matchday):
         st.caption(f"Jornada {int(matchday)} - Fuente: Football-Data.org")
 
@@ -779,7 +1029,7 @@ def render_api_data():
         if url:
             column.image(url, width=38)
         else:
-            column.write("—")
+            column.write("-")
 
     header_cols = st.columns([1.6, 0.7, 0.7, 2.2, 0.7, 2.2, 0.6])
     header_cols[0].markdown("**Fecha**")
@@ -790,53 +1040,62 @@ def render_api_data():
     header_cols[5].markdown("**Visitante**")
     header_cols[6].markdown("**Predecir**")
 
-    for _, row in matches_df.sort_values("utc_date").iterrows():
+    for _, row in matches_df.sort_values('utc_date').iterrows():
         col_fecha, col_matchday, col_home_logo, col_home_name, col_away_logo, col_away_name, col_btn = st.columns(
             [1.6, 0.7, 0.7, 2.2, 0.7, 2.2, 0.6]
         )
         col_fecha.markdown(f"**{_format_date(row.get('utc_date'))}**")
-        md_label = f"{int(row['matchday'])}" if pd.notna(row.get("matchday")) else "MD -"
+        md_label = f"{int(row['matchday'])}" if pd.notna(row.get('matchday')) else "MD -"
         col_matchday.markdown(md_label)
-        _render_logo(col_home_logo, row.get("home_team_logo"))
+        _render_logo(col_home_logo, row.get('home_team_logo'))
         col_home_name.markdown(f"**{row.get('home_team', 'N/D')}**")
-        _render_logo(col_away_logo, row.get("away_team_logo"))
-        col_away_name.markdown(row.get("away_team", "N/D"))
-        col_btn.button("⚡", key=f"predict_{row.get('match_id')}", help="Calcular predicción")
+        _render_logo(col_away_logo, row.get('away_team_logo'))
+        col_away_name.markdown(row.get('away_team', 'N/D'))
+        if col_btn.button('✳️', key=f"predict_{row.get('match_id')}", help='Calcular prediccion para este partido'):
+            try:
+                prediction = predict_match_from_api(row, standings_payload, selected_code, selected_label)
+                st.session_state.last_api_prediction = prediction
+                st.success(f"Prediccion lista para {row.get('home_team')} vs {row.get('away_team')}")
+            except Exception as exc:
+                st.error(f"No se pudo generar la prediccion: {exc}")
 
-# ===== Sección Predicción Manual =====
+    last_prediction = st.session_state.get('last_api_prediction')
+    if last_prediction:
+        st.markdown("#### Ultima prediccion generada")
+        st.write(f"{last_prediction.get('home', '-')} vs {last_prediction.get('away', '-')} (Jornada {last_prediction.get('matchday', '-')})")
+        st.dataframe(last_prediction['probabilities'], use_container_width=True, hide_index=True)
+        if last_prediction.get('label'):
+            st.caption(f"Resultado estimado: {last_prediction.get('label')}")
+
 def render_prediccion_manual():
-    st.markdown('<div class="section-title">🔮 Predicción manual</div>', unsafe_allow_html=True)
-    if st.session_state.pipeline is None:
-        try:
-            st.session_state.pipeline = joblib.load("dev/pipeline_logreg_pca_09.joblib")
-            st.success("Modelo cargado automáticamente")
-        except Exception as e:
-            st.error(f"No se pudo cargar el modelo: {e}")
-            return
-    pipeline = st.session_state.pipeline
-    tabs = st.tabs(["🧾 CSV", "📝 Manual"])
+    st.markdown('<div class="section-title">Prediccion manual</div>', unsafe_allow_html=True)
+    pipeline = get_prediction_pipeline()
+    if pipeline is None:
+        st.error(st.session_state.pipeline_error or 'No se pudo cargar el modelo para predecir.')
+        return
+    tabs = st.tabs(['CSV', 'Manual'])
 
     with tabs[0]:
-        st.subheader("📂 Cargar CSV con columnas crudas")
-        data_file = st.file_uploader("Subí tu archivo CSV", type=["csv"])
+        st.subheader('Cargar CSV con columnas crudas')
+        data_file = st.file_uploader('Subí tu archivo CSV', type=['csv'])
         if data_file:
             df_pred = preprocessCSV(pd.read_csv(data_file))
             st.dataframe(df_pred.head())
-            if st.button("🔮 Predecir desde CSV"):
+            if st.button('Predecir desde CSV'):
                 probas = pipeline.predict_proba(df_pred)
-                classes = pipeline.named_steps["model"].classes_
+                classes = pipeline.named_steps['model'].classes_
                 prob_table = build_prob_table(probas, classes)
-                st.dataframe(prob_table.style.format("{:.2%}"))
+                st.dataframe(prob_table.style.format('{:.2%}'))
 
     with tabs[1]:
         render_manual_form(pipeline)
 
-    st.markdown("---")
-    st.warning("❗ Esta herramienta tiene fines educativos. No promueve apuestas deportivas.")
+    st.markdown('---')
+    st.warning('Esta herramienta tiene fines educativos. No promueve apuestas deportivas.')
 
 # ===== Sección About =====
 def render_about():
-    st.markdown('<div class="section-title">ℹ️ Acerca del proyecto</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Acerca del proyecto</div>', unsafe_allow_html=True)
     st.markdown("""
 <div class="card-about">
 <b>Footy Predictor</b> es una aplicación educativa para el análisis y predicción de partidos de fútbol en las 5 grandes ligas europeas.  
@@ -844,12 +1103,12 @@ Utiliza Machine Learning (Logistic Regression + PCA) y visualizaciones interacti
 </div>
 
 <div class="card-about">
-<b>🎯 Objetivo</b><br>
+<b> Objetivo</b><br>
 Analizar datos reales del fútbol europeo y generar predicciones H/D/A (local, empate, visitante) de manera automatizada.
 </div>
 
 <div class="card-about">
-<b>🧠 Tecnologías</b>
+<b> Tecnologí­as</b>
 <ul>
 <li>Python 3.11</li>
 <li>Streamlit</li>
@@ -860,17 +1119,17 @@ Analizar datos reales del fútbol europeo y generar predicciones H/D/A (local, e
 </div>
 
 <div class="card-about">
-<b>👨‍💻 Autores</b><br>
+<b> Autores</b><br>
 Diego Páez y Nicolás Carcaño  
-UTN — Facultad Regional Mendoza (2025)
+UTN - Facultad Regional Mendoza (2025)
 </div>
 """, unsafe_allow_html=True)
-    st.markdown('<div class="footer">© 2025 Footy Predictor — Proyecto académico</div>', unsafe_allow_html=True)
+    st.markdown('<div class="footer">© 2025 Footy Predictor - Proyecto académico</div>', unsafe_allow_html=True)
 
 # ===== Layout =====
 st.markdown('<div class="header"><h1>Footy Predictor</h1><hr></div>', unsafe_allow_html=True)
 with st.sidebar:
-    st.markdown("### 🚀 Navegación")
+    st.markdown("### Navegación")
     page = st.radio("", [ "Tablas y predicción", "Visualizaciones", "Informe de modelos", "Predicción manual", "Acerca"])
     st.session_state.selected_page = page
 
