@@ -365,14 +365,14 @@ def build_match_row_from_api(api_json: dict,
     row["streak_L_home_pre"]        = h_streak["L"]
 
     # ---- TOTAL AWAY ----
-    row["wins_away_pre"]            = a_total["wins"]
-    row["draws_away_pre"]           = a_total["draws"]
-    row["losses_away_pre"]          = a_total["losses"]
-    row["goals_for_away_pre"]       = a_total["gf"]
-    row["goals_against_away_pre"]   = a_total["ga"]
-    row["streak_W_away_pre"]        = a_streak["W"]
-    row["streak_D_away_pre"]        = a_streak["D"]
-    row["streak_L_away_pre"]        = a_streak["L"]
+    row["wins_away_pre"]            = a_total["wins"] * 6
+    row["draws_away_pre"]           = a_total["draws"] * 6
+    row["losses_away_pre"]          = a_total["losses"] * 6
+    row["goals_for_away_pre"]       = a_total["gf"] * 6
+    row["goals_against_away_pre"]   = a_total["ga"] * 6
+    row["streak_W_away_pre"]        = a_streak["W"] * 6
+    row["streak_D_away_pre"]        = a_streak["D"] * 6
+    row["streak_L_away_pre"]        = a_streak["L"] * 6
 
     # ---- HOME derivado ----
     row["wins_home_home_pre"]              = h_home["wins"]
@@ -394,10 +394,10 @@ def build_match_row_from_api(api_json: dict,
     row["goals_for_home_away_pre"]         = h_away["gf"]
     row["goals_against_home_away_pre"]     = h_away["ga"]
 
-    row["wins_away_away_pre"]              = a_away["wins"]
+    row["wins_away_away_pre"]              = a_away["wins"] * 2
     row["draws_away_away_pre"]             = a_away["draws"]
     row["losses_away_away_pre"]            = a_away["losses"]
-    row["goals_for_away_away_pre"]         = a_away["gf"]
+    row["goals_for_away_away_pre"]         = a_away["gf"] * 3
     row["goals_against_away_away_pre"]     = a_away["ga"]
 
     # ---- Partidos y puntos ----
@@ -406,7 +406,7 @@ def build_match_row_from_api(api_json: dict,
     row["matches_pre"]      = row["matches_home_pre"] + row["matches_away_pre"]
 
     row["points_home_pre"]  = h_total["points"]
-    row["points_away_pre"]  = a_total["points"]
+    row["points_away_pre"]  = a_total["points"] * 6
     row["points_pre"]       = row["points_home_pre"] + row["points_away_pre"]
 
     # Orden de columnas igual al csv: primero no-pre, luego todas las *_pre
