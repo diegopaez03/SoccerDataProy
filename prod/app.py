@@ -41,7 +41,7 @@ API_LEAGUES = [
     {"label": "Ligue 1", "code": "FL1"},
 ]
 API_LEAGUE_CODE_INDEX = {opt["code"]: idx for idx, opt in enumerate(API_LEAGUES)}
-HISTORY_CSV_PATH = ROOT_DIR / 'data' / 'ALL_top5_20seasons_consolidated.csv'
+HISTORY_CSV_PATH = ROOT_DIR / 'data' / 'ALL_top5_20seasons_consolidated2.csv'
 PIPELINE_PATH = ROOT_DIR / 'dev' / 'pipeline_logreg_pca_09.joblib'
 
 DIVISION_CODES = {
@@ -319,6 +319,8 @@ def predict_match_from_api(row, standings_payload, competition_code, league_labe
     return {
         'home': row.get('home_team'),
         'away': row.get('away_team'),
+        'home_logo': row.get('home_team_logo'),
+        'away_logo': row.get('away_team_logo'),
         'matchday': row.get('matchday'),
         'probabilities': prob_table,
         'label': predicted_label,
@@ -798,145 +800,6 @@ def render_ligas():
     else:
         st.info(f"No se encontraron partidos históricos del equipo {equipo_sel} en {league}.")
 
-    
-
-    # ===== Comparación entre dos equipos (Radar Chart general) =====
-    st.markdown("### Comparador general entre equipos")
-
-    # Usamos directamente el dataframe ya filtrado por liga
-    league_df = league_df_global.copy()
-
-    equipos = sorted(
-        pd.unique(
-            league_df["HomeTeam"].dropna().tolist() +
-            league_df["AwayTeam"].dropna().tolist()
-        )
-    )
-
-    colA, colB = st.columns(2)
-    with colA:
-        equipo_a = st.selectbox("Equipo A", equipos, key="radar_team_a")
-    with colB:
-        equipo_b = st.selectbox("Equipo B", equipos, key="radar_team_b")
-
-    if equipo_a != equipo_b:
-
-        # Función para extraer estadÃ­sticas del equipo (local/visitante)
-        def stats_por_equipo(df, equipo):
-            registros = []
-
-            for _, row in df.iterrows():
-                if row["HomeTeam"] == equipo:
-                    registros.append({
-                        "Team": equipo,
-                        "GF": row["FTHG"],
-                        "GA": row["FTAG"],
-                        "Shots": row["HS"],
-                        "ShotsOnTarget": row["HST"],
-                        "Fouls": row["HF"],
-                        "Corners": row["HC"],
-                        "Yellow": row["HY"],
-                        "Red": row["HR"]
-                    })
-                elif row["AwayTeam"] == equipo:
-                    registros.append({
-                        "Team": equipo,
-                        "GF": row["FTAG"],
-                        "GA": row["FTHG"],
-                        "Shots": row["AS"],
-                        "ShotsOnTarget": row["AST"],
-                        "Fouls": row["AF"],
-                        "Corners": row["AC"],
-                        "Yellow": row["AY"],
-                        "Red": row["AR"]
-                    })
-
-            df_stats = pd.DataFrame(registros)
-            if df_stats.empty:
-                return None
-
-            return (
-                df_stats.mean(numeric_only=True)
-                .reset_index()
-                .rename(columns={0: "Value"})
-            )
-
-        df_a = stats_por_equipo(league_df, equipo_a)
-        df_b = stats_por_equipo(league_df, equipo_b)
-
-        if df_a is None or df_b is None:
-            st.info("No hay datos suficientes para ambos equipos en esta liga.")
-        else:
-            # Construimos tabla para radar
-            radar_df = pd.concat([
-                df_a.assign(Team=equipo_a),
-                df_b.assign(Team=equipo_b)
-            ])
-
-            # Reemplazar NaN â fundamental para que el radar no colapse
-            radar_df = radar_df.fillna(0)
-
-            metric_labels = {
-                "GF": "Goles a favor",
-                "GA": "Goles en contra",
-                "Shots": "Tiros",
-                "ShotsOnTarget": "Tiros al arco",
-                "Fouls": "Faltas",
-                "Corners": "Córners",
-                "Yellow": "Amarillas",
-                "Red": "Rojas"
-            }
-
-            radar_df["MetricLabel"] = radar_df["index"].map(metric_labels)
-
-            # Escala radial dinámica (visible en TODOS los casos)
-            max_val = radar_df["Value"].max()
-            if max_val < 5:
-                max_val = 5
-            elif max_val < 10:
-                max_val = 10
-            else:
-                max_val = round(max_val + 2)
-
-            # ===== Radar grande, visible y relleno =====
-            radar_chart = (
-                alt.Chart(radar_df, title="Comparativa promedio por partido")
-                .mark_area(opacity=0.25)
-                .encode(
-                    theta=alt.Theta(
-                        "MetricLabel:N",
-                        sort=list(metric_labels.values())
-                    ),
-                    radius=alt.Radius(
-                        "Value:Q",
-                        scale=alt.Scale(domain=[0, max_val], nice=False)
-                    ),
-                    color=alt.Color("Team:N", title="Equipo"),
-                    tooltip=[
-                        alt.Tooltip("Team:N", title="Equipo"),
-                        alt.Tooltip("MetricLabel:N", title="Métrica"),
-                        alt.Tooltip("Value:Q", title="Prom. por partido", format=".2f"),
-                    ]
-                )
-                .properties(
-                    width=650,
-                    height=650,
-                    background="#f2f2f2",
-                    padding={"left": 40, "right": 40, "top": 40, "bottom": 40}
-                )
-                .configure_view(stroke=None)
-                .configure_title(
-                    fontSize=22,
-                    color="black",
-                    anchor="start"
-                )
-            )
-
-            st.altair_chart(radar_chart)
-
-    else:
-        st.info("ElegÃ­ dos equipos distintos para comparar.")
-
 # ===== Seccion Datos API =====
 def render_api_data():
     st.markdown('<div class="section-title">Tablas y predicción</div>', unsafe_allow_html=True)
@@ -1051,7 +914,7 @@ def render_api_data():
         col_home_name.markdown(f"**{row.get('home_team', 'N/D')}**")
         _render_logo(col_away_logo, row.get('away_team_logo'))
         col_away_name.markdown(row.get('away_team', 'N/D'))
-        if col_btn.button('✳️', key=f"predict_{row.get('match_id')}", help='Calcular prediccion para este partido'):
+        if col_btn.button('\u26a1', key=f"predict_{row.get('match_id')}", help='Calcular prediccion para este partido'):
             try:
                 prediction = predict_match_from_api(row, standings_payload, selected_code, selected_label)
                 st.session_state.last_api_prediction = prediction
@@ -1063,9 +926,34 @@ def render_api_data():
     if last_prediction:
         st.markdown("#### Ultima prediccion generada")
         st.write(f"{last_prediction.get('home', '-')} vs {last_prediction.get('away', '-')} (Jornada {last_prediction.get('matchday', '-')})")
-        st.dataframe(last_prediction['probabilities'], use_container_width=True, hide_index=True)
-        if last_prediction.get('label'):
-            st.caption(f"Resultado estimado: {last_prediction.get('label')}")
+        prob_table = last_prediction.get('probabilities')
+        if isinstance(prob_table, pd.DataFrame):
+            rename_map = {'H': 'Gana Local', 'D': 'Empate', 'A': 'Gana Visitante'}
+            prob_display = prob_table.rename(columns=rename_map)
+            ordered_cols = [c for c in ['Gana Local', 'Empate', 'Gana Visitante'] if c in prob_display.columns]
+            if ordered_cols:
+                prob_display = prob_display[ordered_cols]
+            st.dataframe(prob_display.style.format('{:.2%}'), use_container_width=True, hide_index=True)
+        label = last_prediction.get('label')
+        if label:
+            st.markdown("##### Resultado estimado")
+            col_left, col_center, col_right = st.columns([2, 2, 2])
+
+            def _render_team(column, logo, name, subtitle=""):
+                if logo:
+                    column.image(logo, width=60)
+                column.markdown(f"**{name or 'N/D'}**")
+                if subtitle:
+                    column.markdown(f"##### {subtitle}")
+
+            if label == 'H':
+                _render_team(col_center, last_prediction.get('home_logo'), last_prediction.get('home'), "Gana Local")
+            elif label == 'A':
+                _render_team(col_center, last_prediction.get('away_logo'), last_prediction.get('away'), "Gana Visitante")
+            else:
+                _render_team(col_left, last_prediction.get('home_logo'), last_prediction.get('home'))
+                col_center.markdown("**Empate**")
+                _render_team(col_right, last_prediction.get('away_logo'), last_prediction.get('away'))
 
 def render_prediccion_manual():
     st.markdown('<div class="section-title">Prediccion manual</div>', unsafe_allow_html=True)

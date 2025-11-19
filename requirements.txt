@@ -6,3 +6,4 @@ matplotlib>=3.9
 joblib>=1.4
 requests>=2.32
 python-dotenv>=1.0
+shap>=0.50
