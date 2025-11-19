@@ -9,6 +9,10 @@ import altair as alt
 from dotenv import load_dotenv
 import warnings
 warnings.filterwarnings('ignore')
+try:
+    import shap
+except ImportError:
+    shap = None
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -932,10 +936,6 @@ def render_ligas():
 
     else:
         st.info("ElegÃ­ dos equipos distintos para comparar.")
-
-
-
-
 
 # ===== Seccion Datos API =====
 def render_api_data():
